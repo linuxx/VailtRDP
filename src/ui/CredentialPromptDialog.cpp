@@ -19,7 +19,8 @@ bool promptForCredentials(QWidget* parent, const std::optional<QString>& suggest
 
   QDialog dialog(parent);
   dialog.setWindowTitle("");
-  dialog.resize(420, 160);
+  dialog.setMinimumSize(420, 180);
+  dialog.resize(460, 190);
 
   auto* layout = new QVBoxLayout(&dialog);
 

@@ -2,10 +2,13 @@
 
 #include <QApplication>
 #include <QColor>
+#include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
 #include <QFont>
 #include <QFontDatabase>
+#include <QLoggingCategory>
 #include <QPainter>
-#include <QStyle>
 #include <QWidget>
 
 namespace vaultrdp::ui {
@@ -14,51 +17,12 @@ namespace {
 QString g_fontFamily;
 bool g_fontInitialized = false;
 
-QIcon fallbackIcon(AppIcon icon) {
-  QStyle* style = QApplication::style();
-  if (style == nullptr) {
-    return QIcon();
-  }
-
-  switch (icon) {
-    case AppIcon::Vault:
-      return style->standardIcon(QStyle::SP_DriveHDIcon);
-    case AppIcon::Folder:
-    case AppIcon::NewFolder:
-      return style->standardIcon(QStyle::SP_DirIcon);
-    case AppIcon::Connection:
-    case AppIcon::NewConnection:
-      return style->standardIcon(QStyle::SP_ComputerIcon);
-    case AppIcon::Gateway:
-    case AppIcon::NewGateway:
-      return style->standardIcon(QStyle::SP_DriveNetIcon);
-    case AppIcon::Credential:
-    case AppIcon::NewCredential:
-      return style->standardIcon(QStyle::SP_FileDialogInfoView);
-    case AppIcon::Connect:
-      return style->standardIcon(QStyle::SP_MediaPlay);
-    case AppIcon::Disconnect:
-      return style->standardIcon(QStyle::SP_BrowserStop);
-    case AppIcon::Lock:
-      return style->standardIcon(QStyle::SP_MessageBoxWarning);
-    case AppIcon::Settings:
-      return style->standardIcon(QStyle::SP_FileDialogDetailedView);
-    case AppIcon::Edit:
-      return style->standardIcon(QStyle::SP_FileDialogDetailedView);
-    case AppIcon::Duplicate:
-      return style->standardIcon(QStyle::SP_FileDialogNewFolder);
-    case AppIcon::Rename:
-      return style->standardIcon(QStyle::SP_FileDialogContentsView);
-    case AppIcon::Delete:
-      return style->standardIcon(QStyle::SP_TrashIcon);
-  }
-  return QIcon();
-}
-
 QChar glyphForIcon(AppIcon icon) {
   switch (icon) {
+    case AppIcon::Brand:
+      return QChar(0xf3ed);  // fa-shield-halved
     case AppIcon::Vault:
-      return QChar(0xf3c5);  // fa-vault
+      return QChar(0xf07b);  // fa-folder
     case AppIcon::Folder:
     case AppIcon::NewFolder:
       return QChar(0xf07b);  // fa-folder
@@ -67,12 +31,13 @@ QChar glyphForIcon(AppIcon icon) {
       return QChar(0xf390);  // fa-desktop
     case AppIcon::Gateway:
     case AppIcon::NewGateway:
-      return QChar(0xf6ff);  // fa-network-wired
+      return QChar(0xf3ed);  // fa-shield-halved
     case AppIcon::Credential:
-    case AppIcon::NewCredential:
       return QChar(0xf084);  // fa-key
+    case AppIcon::NewCredential:
+      return QChar(0xf2bb);  // fa-address-card
     case AppIcon::Connect:
-      return QChar(0xf0c1);  // fa-link
+      return QChar(0xf0a1);  // fa-bullhorn
     case AppIcon::Disconnect:
       return QChar(0xf127);  // fa-unlink
     case AppIcon::Lock:
@@ -92,7 +57,7 @@ QChar glyphForIcon(AppIcon icon) {
 }
 
 QIcon iconFromGlyph(QChar glyph, const QColor& color) {
-  QPixmap pixmap(20, 20);
+  QPixmap pixmap(24, 24);
   pixmap.fill(Qt::transparent);
 
   QPainter painter(&pixmap);
@@ -100,12 +65,44 @@ QIcon iconFromGlyph(QChar glyph, const QColor& color) {
   painter.setPen(color);
 
   QFont font(g_fontFamily);
-  font.setPixelSize(14);
+  font.setPixelSize(17);
   painter.setFont(font);
   painter.drawText(pixmap.rect(), Qt::AlignCenter, QString(glyph));
   painter.end();
 
   return QIcon(pixmap);
+}
+
+QColor colorForIcon(AppIcon icon, const QWidget* widget) {
+  QColor base = QApplication::palette().color(QPalette::WindowText);
+  if (widget != nullptr) {
+    base = widget->palette().color(QPalette::WindowText);
+  }
+  switch (icon) {
+    case AppIcon::Brand:
+      return QColor(66, 141, 255);
+    case AppIcon::Vault:
+    case AppIcon::Folder:
+    case AppIcon::NewFolder:
+      return QColor(233, 187, 72);
+    case AppIcon::Connection:
+    case AppIcon::NewConnection:
+    case AppIcon::Connect:
+      return QColor(66, 141, 255);
+    case AppIcon::Gateway:
+    case AppIcon::NewGateway:
+      return QColor(83, 205, 143);
+    case AppIcon::Credential:
+      return QColor(239, 185, 65);
+    case AppIcon::NewCredential:
+      return QColor(239, 185, 65);
+    case AppIcon::Lock:
+      return QColor(152, 160, 174);
+    case AppIcon::Delete:
+      return QColor(220, 95, 95);
+    default:
+      return base;
+  }
 }
 
 }  // namespace
@@ -116,8 +113,26 @@ bool initializeIconTheme() {
   }
   g_fontInitialized = true;
 
-  const int fontId = QFontDatabase::addApplicationFont(":/fonts/fa-solid-900.ttf");
+  int fontId = QFontDatabase::addApplicationFont(":/fonts/fa-solid-900.ttf");
   if (fontId < 0) {
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QStringList candidates = {
+        QDir(appDir).filePath("../resources/fonts/fa-solid-900.ttf"),
+        QDir(appDir).filePath("../../resources/fonts/fa-solid-900.ttf"),
+        "/home/cbeagle/Apps/VaultRDP/resources/fonts/fa-solid-900.ttf",
+    };
+    for (const QString& candidate : candidates) {
+      if (!QFileInfo::exists(candidate)) {
+        continue;
+      }
+      fontId = QFontDatabase::addApplicationFont(candidate);
+      if (fontId >= 0) {
+        break;
+      }
+    }
+  }
+  if (fontId < 0) {
+    qWarning() << "[icons] failed to load Font Awesome font";
     return false;
   }
   const QStringList families = QFontDatabase::applicationFontFamilies(fontId);
@@ -129,21 +144,19 @@ bool initializeIconTheme() {
 }
 
 QIcon themedIcon(AppIcon icon, const QWidget* widget) {
+  const QColor color = colorForIcon(icon, widget);
   if (!initializeIconTheme()) {
-    return fallbackIcon(icon);
-  }
-
-  QColor color = QApplication::palette().color(QPalette::WindowText);
-  if (widget != nullptr) {
-    color = widget->palette().color(QPalette::WindowText);
+    Q_UNUSED(icon);
+    Q_UNUSED(color);
+    return QIcon();
   }
 
   const QChar glyph = glyphForIcon(icon);
   if (glyph.isNull()) {
-    return fallbackIcon(icon);
+    qWarning() << "[icons] unknown glyph mapping for icon";
+    return QIcon();
   }
   return iconFromGlyph(glyph, color);
 }
 
 }  // namespace vaultrdp::ui
-

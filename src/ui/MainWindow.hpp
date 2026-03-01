@@ -18,6 +18,7 @@ class QTreeView;
 class QAction;
 class QCloseEvent;
 class QLabel;
+class QLineEdit;
 class QPushButton;
 class QSplitter;
 class QToolBar;
@@ -59,6 +60,12 @@ class MainWindow : public QMainWindow {
   void closeEvent(QCloseEvent* event) override;
 
  private:
+  enum class ThemeMode : int {
+    System = 0,
+    Dark = 1,
+    Light = 2,
+  };
+
   void restoreUiSettings();
   void persistUiSettings() const;
   void updateCreateActionAvailability();
@@ -68,6 +75,11 @@ class MainWindow : public QMainWindow {
   void setupUi();
   void setupMenuBar();
   void setupToolBar();
+  void applyTreeFilter(const QString& filterText);
+  bool applyTreeFilterRecursive(const QModelIndex& index, const QString& filterLower);
+  void applyTheme(ThemeMode mode);
+  ThemeMode savedThemeMode() const;
+  void setThemeMode(ThemeMode mode);
   void reloadFolderTree();
   void createFolder();
   void createConnection();
@@ -126,6 +138,7 @@ class MainWindow : public QMainWindow {
   std::unique_ptr<vaultrdp::core::repository::SecretRepository> secretRepository_;
   QStandardItemModel* folderTreeModel_;
   QTreeView* folderTreeView_;
+  QLineEdit* treeSearchEdit_;
   QTabWidget* sessionTabWidget_;
   QAction* newFolderAction_;
   QAction* newConnectionAction_;
@@ -135,6 +148,9 @@ class MainWindow : public QMainWindow {
   QAction* disconnectAction_;
   QAction* disconnectAllAction_;
   QAction* lockVaultAction_;
+  QAction* themeSystemAction_;
+  QAction* themeDarkAction_;
+  QAction* themeLightAction_;
   QLabel* vaultStatusLabel_;
   QLabel* debugModeLabel_;
   QPushButton* unlockVaultButton_;
@@ -161,4 +177,5 @@ class MainWindow : public QMainWindow {
   QString lastRemoteClipboardUriList_;
   bool lastClipboardWasRemoteFileUris_;
   bool isReloadingTree_;
+  bool isApplyingTreeFilter_;
 };

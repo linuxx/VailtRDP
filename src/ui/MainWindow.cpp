@@ -1,7 +1,9 @@
 #include "ui/MainWindow.hpp"
 
 #include <QAction>
+#include <QActionGroup>
 #include <QAbstractItemView>
+#include <QApplication>
 #include <QClipboard>
 #include <QDateTime>
 #include <QDialog>
@@ -25,15 +27,18 @@
 #include <QSet>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QSizePolicy>
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QSplitter>
 #include <QStandardItem>
 #include <QStandardItemModel>
 #include <QStatusBar>
+#include <QStyle>
 #include <QTabWidget>
 #include <QTimer>
 #include <QToolBar>
+#include <QToolButton>
 #include <QTreeView>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -80,6 +85,65 @@ using vaultrdp::ui::themedIcon;
 using vaultrdp::ui::makeSessionRuntimeOptionsJson;
 using vaultrdp::ui::parseSessionRuntimeOptions;
 using vaultrdp::ui::SessionRuntimeOptions;
+
+std::optional<QString> promptPasswordValue(QWidget* parent, const QString& promptText) {
+  QDialog dialog(parent);
+  dialog.setWindowTitle("");
+  dialog.setMinimumSize(420, 140);
+  dialog.resize(460, 150);
+
+  auto* layout = new QVBoxLayout(&dialog);
+  auto* promptLabel = new QLabel(promptText, &dialog);
+  promptLabel->setWordWrap(true);
+  auto* passwordEdit = new QLineEdit(&dialog);
+  passwordEdit->setEchoMode(QLineEdit::Password);
+
+  auto* form = new QFormLayout();
+  form->addRow("Password", passwordEdit);
+
+  auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+  QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+  layout->addWidget(promptLabel);
+  layout->addLayout(form);
+  layout->addWidget(buttons);
+
+  if (dialog.exec() != QDialog::Accepted) {
+    return std::nullopt;
+  }
+  return passwordEdit->text();
+}
+
+std::optional<QString> promptTextValue(QWidget* parent, const QString& promptText, const QString& labelText,
+                                       const QString& initialValue = QString()) {
+  QDialog dialog(parent);
+  dialog.setWindowTitle("");
+  dialog.setMinimumSize(420, 140);
+  dialog.resize(460, 150);
+
+  auto* layout = new QVBoxLayout(&dialog);
+  auto* promptLabel = new QLabel(promptText, &dialog);
+  promptLabel->setWordWrap(true);
+  auto* textEdit = new QLineEdit(&dialog);
+  textEdit->setText(initialValue);
+
+  auto* form = new QFormLayout();
+  form->addRow(labelText, textEdit);
+
+  auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+  QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+  layout->addWidget(promptLabel);
+  layout->addLayout(form);
+  layout->addWidget(buttons);
+
+  if (dialog.exec() != QDialog::Accepted) {
+    return std::nullopt;
+  }
+  return textEdit->text().trimmed();
+}
 }  // namespace
 
 MainWindow::MainWindow(DatabaseManager* databaseManager, vaultrdp::core::VaultManager* vaultManager,
@@ -94,6 +158,7 @@ MainWindow::MainWindow(DatabaseManager* databaseManager, vaultrdp::core::VaultMa
       secretRepository_(std::make_unique<vaultrdp::core::repository::SecretRepository>(databaseManager_)),
       folderTreeModel_(nullptr),
       folderTreeView_(nullptr),
+      treeSearchEdit_(nullptr),
       sessionTabWidget_(nullptr),
       newFolderAction_(nullptr),
       newConnectionAction_(nullptr),
@@ -103,6 +168,9 @@ MainWindow::MainWindow(DatabaseManager* databaseManager, vaultrdp::core::VaultMa
       disconnectAction_(nullptr),
       disconnectAllAction_(nullptr),
       lockVaultAction_(nullptr),
+      themeSystemAction_(nullptr),
+      themeDarkAction_(nullptr),
+      themeLightAction_(nullptr),
       vaultStatusLabel_(nullptr),
       debugModeLabel_(nullptr),
       unlockVaultButton_(nullptr),
@@ -113,10 +181,12 @@ MainWindow::MainWindow(DatabaseManager* databaseManager, vaultrdp::core::VaultMa
       suppressClipboardEvent_(false),
       ignoreClipboardEventsUntilMs_(0),
       lastClipboardWasRemoteFileUris_(false),
-      isReloadingTree_(false) {
+      isReloadingTree_(false),
+      isApplyingTreeFilter_(false) {
   setupUi();
   setupMenuBar();
   setupToolBar();
+  applyTheme(savedThemeMode());
   reloadFolderTree();
   updateVaultStatus();
   maybeRunFirstStartupEncryptionWizard();
@@ -146,6 +216,7 @@ void MainWindow::setupUi() {
   folderTreeView_->setEditTriggers(QAbstractItemView::EditKeyPressed);
   folderTreeView_->setContextMenuPolicy(Qt::CustomContextMenu);
   folderTreeView_->setSelectionMode(QAbstractItemView::SingleSelection);
+  folderTreeView_->setIconSize(QSize(20, 20));
   folderTreeView_->setDragEnabled(true);
   folderTreeView_->setAcceptDrops(true);
   folderTreeView_->setDropIndicatorShown(true);
@@ -158,7 +229,40 @@ void MainWindow::setupUi() {
   folderTreeView_->setModel(folderTreeModel_);
   connect(folderTreeModel_, &QStandardItemModel::itemChanged, this, &MainWindow::onTreeItemChanged);
   connect(folderTreeView_->selectionModel(), &QItemSelectionModel::currentChanged, this,
-          [this](const QModelIndex&, const QModelIndex&) { updateCreateActionAvailability(); });
+          [this](const QModelIndex&, const QModelIndex&) {
+            updateCreateActionAvailability();
+            if (isReloadingTree_ || isApplyingTreeFilter_) {
+              return;
+            }
+            QStringList expandedKeys;
+            QString selectedKey;
+            captureTreeState(&expandedKeys, &selectedKey);
+            QSettings settings;
+            settings.setValue("ui/tree_expanded_keys", expandedKeys);
+            settings.setValue("ui/tree_selected_key", selectedKey);
+          });
+  connect(folderTreeView_, &QTreeView::expanded, this, [this](const QModelIndex&) {
+    if (isReloadingTree_ || isApplyingTreeFilter_) {
+      return;
+    }
+    QStringList expandedKeys;
+    QString selectedKey;
+    captureTreeState(&expandedKeys, &selectedKey);
+    QSettings settings;
+    settings.setValue("ui/tree_expanded_keys", expandedKeys);
+    settings.setValue("ui/tree_selected_key", selectedKey);
+  });
+  connect(folderTreeView_, &QTreeView::collapsed, this, [this](const QModelIndex&) {
+    if (isReloadingTree_ || isApplyingTreeFilter_) {
+      return;
+    }
+    QStringList expandedKeys;
+    QString selectedKey;
+    captureTreeState(&expandedKeys, &selectedKey);
+    QSettings settings;
+    settings.setValue("ui/tree_expanded_keys", expandedKeys);
+    settings.setValue("ui/tree_selected_key", selectedKey);
+  });
   dragTreeView->setDropCallback([this](const vaultrdp::ui::FolderTreeView::DragPayload& payload,
                                        const std::optional<QString>& destinationFolderId) {
     const auto scheduleReload = [this]() {
@@ -211,9 +315,52 @@ void MainWindow::setupUi() {
 
   welcomeTab_ = new QWidget(sessionTabWidget_);
   auto* emptyLayout = new QVBoxLayout(welcomeTab_);
-  auto* emptyLabel = new QLabel("No active sessions. Select a connection and press Enter to connect.", welcomeTab_);
-  emptyLabel->setWordWrap(true);
-  emptyLayout->addWidget(emptyLabel);
+  emptyLayout->setContentsMargins(40, 40, 40, 40);
+  emptyLayout->setSpacing(18);
+  emptyLayout->addStretch();
+
+  auto* titleLabel = new QLabel("No Active Sessions", welcomeTab_);
+  titleLabel->setObjectName("welcomeTitleLabel");
+  titleLabel->setAlignment(Qt::AlignHCenter);
+  emptyLayout->addWidget(titleLabel);
+
+  auto* subtitleLabel = new QLabel("No active sessions. Select one of the options below to add a new item.", welcomeTab_);
+  subtitleLabel->setObjectName("welcomeSubtitleLabel");
+  subtitleLabel->setAlignment(Qt::AlignHCenter);
+  subtitleLabel->setWordWrap(true);
+  emptyLayout->addWidget(subtitleLabel);
+
+  auto* cardsRow = new QHBoxLayout();
+  cardsRow->setSpacing(14);
+  cardsRow->setContentsMargins(0, 8, 0, 0);
+
+  auto* newConnectionCard = new QPushButton("New Connection", welcomeTab_);
+  newConnectionCard->setObjectName("welcomeCardButton");
+  newConnectionCard->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewConnection, this));
+  newConnectionCard->setIconSize(QSize(32, 32));
+  newConnectionCard->setMinimumSize(220, 96);
+  connect(newConnectionCard, &QPushButton::clicked, this, &MainWindow::createConnection);
+
+  auto* newGatewayCard = new QPushButton("New Gateway", welcomeTab_);
+  newGatewayCard->setObjectName("welcomeCardButton");
+  newGatewayCard->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewGateway, this));
+  newGatewayCard->setIconSize(QSize(32, 32));
+  newGatewayCard->setMinimumSize(220, 96);
+  connect(newGatewayCard, &QPushButton::clicked, this, &MainWindow::createGateway);
+
+  auto* newCredentialCard = new QPushButton("New Credential", welcomeTab_);
+  newCredentialCard->setObjectName("welcomeCardButton");
+  newCredentialCard->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewCredential, this));
+  newCredentialCard->setIconSize(QSize(32, 32));
+  newCredentialCard->setMinimumSize(220, 96);
+  connect(newCredentialCard, &QPushButton::clicked, this, &MainWindow::createCredential);
+
+  cardsRow->addStretch();
+  cardsRow->addWidget(newConnectionCard);
+  cardsRow->addWidget(newGatewayCard);
+  cardsRow->addWidget(newCredentialCard);
+  cardsRow->addStretch();
+  emptyLayout->addLayout(cardsRow);
   emptyLayout->addStretch();
 
   sessionTabWidget_->addTab(welcomeTab_, "Welcome");
@@ -469,6 +616,9 @@ void MainWindow::updateCreateActionAvailability() {
   if (newGatewayAction_ != nullptr) {
     newGatewayAction_->setEnabled(!atVaultLevel);
   }
+  if (connectAction_ != nullptr) {
+    connectAction_->setEnabled(itemType == kItemTypeConnection);
+  }
 }
 
 bool MainWindow::validateMoveByScopeRules(int itemType, const QString& itemId,
@@ -641,6 +791,29 @@ void MainWindow::setupMenuBar() {
   viewMenu->addAction("Expand All", folderTreeView_, &QTreeView::expandAll);
   viewMenu->addAction("Collapse All", folderTreeView_, &QTreeView::collapseAll);
 
+  auto* settingsMenu = menuBar()->addMenu("&Settings");
+  auto* themeMenu = settingsMenu->addMenu("Theme");
+  auto* themeActionGroup = new QActionGroup(this);
+  themeActionGroup->setExclusive(true);
+  themeSystemAction_ = themeMenu->addAction("Use system (default)");
+  themeSystemAction_->setCheckable(true);
+  themeDarkAction_ = themeMenu->addAction("Dark");
+  themeDarkAction_->setCheckable(true);
+  themeLightAction_ = themeMenu->addAction("Light");
+  themeLightAction_->setCheckable(true);
+  themeActionGroup->addAction(themeSystemAction_);
+  themeActionGroup->addAction(themeDarkAction_);
+  themeActionGroup->addAction(themeLightAction_);
+
+  const ThemeMode mode = savedThemeMode();
+  themeSystemAction_->setChecked(mode == ThemeMode::System);
+  themeDarkAction_->setChecked(mode == ThemeMode::Dark);
+  themeLightAction_->setChecked(mode == ThemeMode::Light);
+
+  connect(themeSystemAction_, &QAction::triggered, this, [this]() { setThemeMode(ThemeMode::System); });
+  connect(themeDarkAction_, &QAction::triggered, this, [this]() { setThemeMode(ThemeMode::Dark); });
+  connect(themeLightAction_, &QAction::triggered, this, [this]() { setThemeMode(ThemeMode::Light); });
+
   auto* sessionMenu = menuBar()->addMenu("&Session");
   connectAction_ = sessionMenu->addAction("Connect", this, &MainWindow::connectSelectedConnection);
   connectAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Connect, this));
@@ -665,23 +838,57 @@ void MainWindow::setupMenuBar() {
 void MainWindow::setupToolBar() {
   mainToolBar_ = addToolBar("Main");
   mainToolBar_->setMovable(false);
+  mainToolBar_->setObjectName("topToolBar");
+  mainToolBar_->setIconSize(QSize(22, 22));
 
-  mainToolBar_->addAction(newFolderAction_);
-  mainToolBar_->addAction(newConnectionAction_);
-  mainToolBar_->addAction(newCredentialAction_);
+  auto* brandIconLabel = new QLabel(mainToolBar_);
+  brandIconLabel->setPixmap(themedIcon(vaultrdp::ui::AppIcon::Brand, this).pixmap(22, 22));
+  brandIconLabel->setObjectName("topBrandIconLabel");
+  mainToolBar_->addWidget(brandIconLabel);
+
+  auto* brandLabel = new QLabel("VaultRDP", mainToolBar_);
+  brandLabel->setObjectName("topBrandLabel");
+  brandLabel->setMargin(2);
+  mainToolBar_->addWidget(brandLabel);
+  mainToolBar_->addSeparator();
+
+  treeSearchEdit_ = new QLineEdit(mainToolBar_);
+  treeSearchEdit_->setPlaceholderText("Search tree...");
+  treeSearchEdit_->setClearButtonEnabled(true);
+  treeSearchEdit_->setMinimumWidth(360);
+  treeSearchEdit_->setMaximumWidth(600);
+  treeSearchEdit_->setObjectName("topSearchEdit");
+  mainToolBar_->addWidget(treeSearchEdit_);
+  connect(treeSearchEdit_, &QLineEdit::textChanged, this, &MainWindow::applyTreeFilter);
+
+  auto* spacer = new QWidget(mainToolBar_);
+  spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+  mainToolBar_->addWidget(spacer);
+
   mainToolBar_->addSeparator();
   mainToolBar_->addAction(connectAction_);
-  mainToolBar_->addAction(disconnectAction_);
   mainToolBar_->addSeparator();
   mainToolBar_->addAction(lockVaultAction_);
+
+  if (auto* connectButton = qobject_cast<QToolButton*>(mainToolBar_->widgetForAction(connectAction_))) {
+    connectButton->setObjectName("connectButton");
+  }
+  if (auto* lockButton = qobject_cast<QToolButton*>(mainToolBar_->widgetForAction(lockVaultAction_))) {
+    lockButton->setObjectName("lockButton");
+  }
 }
 
 void MainWindow::reloadFolderTree() {
   QStringList expandedKeys;
   QString selectedKey;
-  captureTreeState(&expandedKeys, &selectedKey);
-  if (expandedKeys.isEmpty() && selectedKey.isEmpty()) {
+  const bool hadExistingTree = (folderTreeModel_ != nullptr && folderTreeModel_->rowCount() > 0);
+  bool hasPersistedTreeState = false;
+  if (hadExistingTree) {
+    captureTreeState(&expandedKeys, &selectedKey);
+  } else {
     QSettings settings;
+    hasPersistedTreeState =
+        settings.contains("ui/tree_expanded_keys") || settings.contains("ui/tree_selected_key");
     expandedKeys = settings.value("ui/tree_expanded_keys").toStringList();
     selectedKey = settings.value("ui/tree_selected_key").toString();
   }
@@ -789,24 +996,265 @@ void MainWindow::reloadFolderTree() {
   }
 
   restoreTreeState(expandedKeys, selectedKey);
-  if (expandedKeys.isEmpty()) {
+  if (!hadExistingTree && !hasPersistedTreeState && expandedKeys.isEmpty()) {
     const QModelIndex rootIndex = folderTreeModel_->index(0, 0);
     if (rootIndex.isValid()) {
       folderTreeView_->setExpanded(rootIndex, true);
     }
   }
+  if (treeSearchEdit_ != nullptr && !treeSearchEdit_->text().trimmed().isEmpty()) {
+    applyTreeFilter(treeSearchEdit_->text());
+  }
   updateCreateActionAvailability();
   isReloadingTree_ = false;
 }
 
-void MainWindow::createFolder() {
-  qInfo() << "[ui] createFolder requested";
-  const QString name = QInputDialog::getText(this, "New Folder", "Folder name:");
-  if (name.trimmed().isEmpty()) {
+void MainWindow::applyTreeFilter(const QString& filterText) {
+  if (folderTreeModel_ == nullptr || folderTreeView_ == nullptr) {
     return;
   }
 
-  const auto created = repository_->createFolder(name, selectedFolderId());
+  isApplyingTreeFilter_ = true;
+  const QString filterLower = filterText.trimmed().toLower();
+  const QModelIndex rootIndex = folderTreeModel_->index(0, 0);
+  if (!rootIndex.isValid()) {
+    isApplyingTreeFilter_ = false;
+    return;
+  }
+
+  if (filterLower.isEmpty()) {
+    std::function<void(const QModelIndex&)> clearHidden = [&](const QModelIndex& parent) {
+      const int rows = folderTreeModel_->rowCount(parent);
+      for (int row = 0; row < rows; ++row) {
+        folderTreeView_->setRowHidden(row, parent, false);
+        const QModelIndex child = folderTreeModel_->index(row, 0, parent);
+        if (child.isValid()) {
+          clearHidden(child);
+        }
+      }
+    };
+    clearHidden(QModelIndex());
+    QSettings settings;
+    restoreTreeState(settings.value("ui/tree_expanded_keys").toStringList(),
+                     settings.value("ui/tree_selected_key").toString());
+    isApplyingTreeFilter_ = false;
+    return;
+  }
+
+  const int rootRows = folderTreeModel_->rowCount();
+  for (int row = 0; row < rootRows; ++row) {
+    const QModelIndex index = folderTreeModel_->index(row, 0);
+    const bool keep = applyTreeFilterRecursive(index, filterLower);
+    folderTreeView_->setRowHidden(row, QModelIndex(), !keep);
+  }
+  isApplyingTreeFilter_ = false;
+}
+
+bool MainWindow::applyTreeFilterRecursive(const QModelIndex& index, const QString& filterLower) {
+  if (!index.isValid()) {
+    return false;
+  }
+
+  const QString text = index.data(Qt::DisplayRole).toString().toLower();
+  bool selfMatch = text.contains(filterLower);
+  bool childMatch = false;
+
+  const int rows = folderTreeModel_->rowCount(index);
+  for (int row = 0; row < rows; ++row) {
+    const QModelIndex child = folderTreeModel_->index(row, 0, index);
+    const bool keepChild = applyTreeFilterRecursive(child, filterLower);
+    folderTreeView_->setRowHidden(row, index, !keepChild);
+    childMatch = childMatch || keepChild;
+  }
+
+  const bool keep = selfMatch || childMatch;
+  if (keep && childMatch) {
+    folderTreeView_->setExpanded(index, true);
+  }
+  return keep;
+}
+
+MainWindow::ThemeMode MainWindow::savedThemeMode() const {
+  QSettings settings;
+  const int raw = settings.value("ui/theme_mode", static_cast<int>(ThemeMode::System)).toInt();
+  if (raw == static_cast<int>(ThemeMode::Dark)) {
+    return ThemeMode::Dark;
+  }
+  if (raw == static_cast<int>(ThemeMode::Light)) {
+    return ThemeMode::Light;
+  }
+  return ThemeMode::System;
+}
+
+void MainWindow::setThemeMode(ThemeMode mode) {
+  QSettings settings;
+  settings.setValue("ui/theme_mode", static_cast<int>(mode));
+  applyTheme(mode);
+}
+
+void MainWindow::applyTheme(ThemeMode mode) {
+  auto* app = qobject_cast<QApplication*>(QCoreApplication::instance());
+  if (app == nullptr) {
+    return;
+  }
+
+  if (mode == ThemeMode::System) {
+    app->setPalette(QPalette());
+    app->setStyleSheet(QString());
+    return;
+  }
+
+  app->setStyle("Fusion");
+  QPalette palette;
+  if (mode == ThemeMode::Dark) {
+    palette.setColor(QPalette::Window, QColor(32, 36, 44));
+    palette.setColor(QPalette::WindowText, QColor(225, 228, 235));
+    palette.setColor(QPalette::Base, QColor(26, 30, 36));
+    palette.setColor(QPalette::AlternateBase, QColor(36, 40, 48));
+    palette.setColor(QPalette::ToolTipBase, QColor(245, 245, 245));
+    palette.setColor(QPalette::ToolTipText, QColor(20, 20, 20));
+    palette.setColor(QPalette::Text, QColor(225, 228, 235));
+    palette.setColor(QPalette::Button, QColor(42, 47, 56));
+    palette.setColor(QPalette::ButtonText, QColor(225, 228, 235));
+    palette.setColor(QPalette::Highlight, QColor(70, 132, 255));
+    palette.setColor(QPalette::HighlightedText, QColor(255, 255, 255));
+    palette.setColor(QPalette::Disabled, QPalette::Text, QColor(130, 135, 145));
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(130, 135, 145));
+  } else {
+    palette = QApplication::style()->standardPalette();
+    palette.setColor(QPalette::Highlight, QColor(70, 132, 255));
+    palette.setColor(QPalette::HighlightedText, QColor(255, 255, 255));
+  }
+  app->setPalette(palette);
+
+  if (mode == ThemeMode::Dark) {
+    app->setStyleSheet(
+        "QMainWindow{background:#1d2129;}"
+        "QMenuBar{background:#262b35;color:#dfe4ec;border-bottom:1px solid #313846;}"
+        "QMenuBar::item:selected{background:#323a49;}"
+        "QMenu{background:#252b35;color:#dfe4ec;border:1px solid #3a4252;}"
+        "QMenu::item:selected{background:#3a4252;}"
+        "QToolBar#topToolBar{background:#262b35;border-bottom:1px solid #313846;spacing:10px;padding:6px;}"
+        "QLabel#topBrandLabel{font-size:18px;font-weight:700;color:#e6ebf2;padding-left:4px;padding-right:8px;}"
+        "QLineEdit#topSearchEdit{background:#1f2430;border:1px solid #3a4252;border-radius:8px;padding:8px 10px;color:#dfe4ec;}"
+        "QToolButton{background:#333b49;border:1px solid #435066;border-radius:8px;padding:8px 14px;color:#d9e0eb;}"
+        "QToolButton#connectButton{background:#2f4f88;border-color:#3e5f9a;color:#ecf2ff;}"
+        "QToolButton#lockButton{background:#3b414d;border-color:#4a5261;color:#d3dae5;}"
+        "QToolButton:disabled{background:#2b313d;border-color:#394250;color:#7e8897;}"
+        "QTreeView{background:#1d222c;border-right:1px solid #2f3643;padding:4px;show-decoration-selected:1;}"
+        "QTreeView::item{padding:4px 6px;border-radius:6px;}"
+        "QTreeView::item:selected{background:#2e5ea8;color:#f2f7ff;}"
+        "QTabWidget::pane{border:0;}"
+        "QTabBar::tab{background:#2a303b;color:#dbe2eb;padding:8px 12px;border-top-left-radius:8px;border-top-right-radius:8px;}"
+        "QTabBar::tab:selected{background:#3a4352;color:#ffffff;}"
+        "QPushButton#welcomeCardButton{background:#242a35;border:1px solid #353d4d;border-radius:12px;color:#e0e6ef;font-size:15px;font-weight:600;text-align:left;padding:16px;}"
+        "QPushButton#welcomeCardButton:hover{background:#2a3240;border-color:#4268a8;}"
+        "QLabel#welcomeTitleLabel{font-size:42px;font-weight:700;color:#e3e8f0;}"
+        "QLabel#welcomeSubtitleLabel{font-size:22px;color:#aeb6c3;}"
+        "QStatusBar{background:#1f2430;color:#aeb6c3;border-top:1px solid #303846;}");
+  } else {
+    app->setStyleSheet(
+        "QMainWindow{background:#f3f4f7;}"
+        "QMenuBar{background:#f0f2f6;color:#2c3440;border-bottom:1px solid #d9dde6;}"
+        "QMenuBar::item:selected{background:#e3e7ef;}"
+        "QMenu{background:#ffffff;color:#2f3742;border:1px solid #d5dae4;}"
+        "QMenu::item:selected{background:#e8edf7;}"
+        "QToolBar#topToolBar{background:#f0f2f6;border-bottom:1px solid #d9dde6;spacing:10px;padding:6px;}"
+        "QLabel#topBrandLabel{font-size:18px;font-weight:700;color:#273240;padding-left:4px;padding-right:8px;}"
+        "QLineEdit#topSearchEdit{background:#ffffff;border:1px solid #cfd5e1;border-radius:8px;padding:8px 10px;color:#2f3742;}"
+        "QToolButton{background:#e8edf5;border:1px solid #d0d8e5;border-radius:8px;padding:8px 14px;color:#4f5b6f;}"
+        "QToolButton#connectButton{background:#3f7ee8;border-color:#4f8cee;color:#ffffff;}"
+        "QToolButton#lockButton{background:#e8edf5;border-color:#d0d8e5;color:#4f5b6f;}"
+        "QToolButton:disabled{background:#e6ebf3;border-color:#d0d7e4;color:#8f98a8;}"
+        "QTreeView{background:#f7f8fb;border-right:1px solid #d9dde6;padding:4px;show-decoration-selected:1;}"
+        "QTreeView::item{padding:4px 6px;border-radius:6px;}"
+        "QTreeView::item:selected{background:#dbe8ff;color:#233040;}"
+        "QTabWidget::pane{border:0;}"
+        "QTabBar::tab{background:#e8ecf4;color:#374255;padding:8px 12px;border-top-left-radius:8px;border-top-right-radius:8px;}"
+        "QTabBar::tab:selected{background:#ffffff;color:#1f2b3a;}"
+        "QPushButton#welcomeCardButton{background:#ffffff;border:1px solid #d9dfe9;border-radius:12px;color:#2f3742;font-size:15px;font-weight:600;text-align:left;padding:16px;}"
+        "QPushButton#welcomeCardButton:hover{background:#f6f8fc;border-color:#91b4f2;}"
+        "QLabel#welcomeTitleLabel{font-size:42px;font-weight:700;color:#2b3440;}"
+        "QLabel#welcomeSubtitleLabel{font-size:22px;color:#677283;}"
+        "QStatusBar{background:#f0f2f6;color:#5f6979;border-top:1px solid #d9dde6;}");
+  }
+
+  if (newFolderAction_ != nullptr) {
+    newFolderAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewFolder, this));
+  }
+  if (newConnectionAction_ != nullptr) {
+    newConnectionAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewConnection, this));
+  }
+  if (newCredentialAction_ != nullptr) {
+    newCredentialAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewCredential, this));
+  }
+  if (newGatewayAction_ != nullptr) {
+    newGatewayAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewGateway, this));
+  }
+  if (connectAction_ != nullptr) {
+    connectAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Connect, this));
+  }
+  if (disconnectAction_ != nullptr) {
+    disconnectAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Disconnect, this));
+  }
+  if (disconnectAllAction_ != nullptr) {
+    disconnectAllAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Disconnect, this));
+  }
+  if (lockVaultAction_ != nullptr) {
+    lockVaultAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Lock, this));
+  }
+  if (auto* brandIconLabel = findChild<QLabel*>("topBrandIconLabel")) {
+    brandIconLabel->setPixmap(themedIcon(vaultrdp::ui::AppIcon::Brand, this).pixmap(22, 22));
+  }
+  if (folderTreeModel_ != nullptr) {
+    QSignalBlocker modelBlocker(folderTreeModel_);
+    std::function<void(const QModelIndex&)> refreshIcons = [&](const QModelIndex& parent) {
+      const int rows = folderTreeModel_->rowCount(parent);
+      for (int row = 0; row < rows; ++row) {
+        const QModelIndex index = folderTreeModel_->index(row, 0, parent);
+        if (!index.isValid()) {
+          continue;
+        }
+        QStandardItem* item = folderTreeModel_->itemFromIndex(index);
+        if (item != nullptr) {
+          const int itemType = index.data(kItemTypeRole).toInt();
+          switch (itemType) {
+            case kItemTypeVaultRoot:
+              item->setIcon(themedIcon(vaultrdp::ui::AppIcon::Vault, this));
+              break;
+            case kItemTypeFolder:
+              item->setIcon(themedIcon(vaultrdp::ui::AppIcon::Folder, this));
+              break;
+            case kItemTypeConnection:
+              item->setIcon(themedIcon(vaultrdp::ui::AppIcon::Connection, this));
+              break;
+            case kItemTypeGateway:
+              item->setIcon(themedIcon(vaultrdp::ui::AppIcon::Gateway, this));
+              break;
+            case kItemTypeCredential:
+              item->setIcon(themedIcon(vaultrdp::ui::AppIcon::Credential, this));
+              break;
+            default:
+              break;
+          }
+        }
+        refreshIcons(index);
+      }
+    };
+    refreshIcons(QModelIndex());
+  }
+}
+
+void MainWindow::createFolder() {
+  qInfo() << "[ui] createFolder requested";
+  const bool atVaultLevel = !selectedFolderId().has_value();
+  const auto name = promptTextValue(this, atVaultLevel ? "Create a new root folder." : "Create a new subfolder.",
+                                    "Folder name");
+  if (!name.has_value() || name->trimmed().isEmpty()) {
+    return;
+  }
+
+  const auto created = repository_->createFolder(name.value(), selectedFolderId());
   if (!created.has_value()) {
     QMessageBox::critical(this, "Create Folder", "Failed to create folder.");
     return;
@@ -1490,23 +1938,19 @@ void MainWindow::showVaultSettingsDialog() {
   updateButtons();
 
   connect(enableEncryptionButton, &QPushButton::clicked, &dialog, [this, &dialog, refreshStats, updateButtons]() {
-    bool ok = false;
-    const QString passphrase = QInputDialog::getText(&dialog, "",
-                                                     "Set vault password (encrypts database secrets):",
-                                                     QLineEdit::Password, QString(), &ok);
-    if (!ok || passphrase.isEmpty()) {
+    const auto passphrase = promptPasswordValue(&dialog, "Set vault password:");
+    if (!passphrase.has_value() || passphrase->isEmpty()) {
       return;
     }
-    const QString confirm = QInputDialog::getText(&dialog, "", "Confirm vault password:",
-                                                  QLineEdit::Password, QString(), &ok);
-    if (!ok || confirm.isEmpty()) {
+    const auto confirm = promptPasswordValue(&dialog, "Confirm vault password:");
+    if (!confirm.has_value() || confirm->isEmpty()) {
       return;
     }
-    if (passphrase != confirm) {
+    if (passphrase.value() != confirm.value()) {
       QMessageBox::warning(&dialog, "Enable Encryption", "Passwords do not match.");
       return;
     }
-    if (!vaultManager_->enable(passphrase)) {
+    if (!vaultManager_->enable(passphrase.value())) {
       QMessageBox::warning(&dialog, "Enable Encryption",
                            "Failed to enable encryption. Password must satisfy policy.");
       return;
@@ -1544,27 +1988,23 @@ void MainWindow::showVaultSettingsDialog() {
     }
 
     while (true) {
-      bool ok = false;
-      const QString oldPass = QInputDialog::getText(&dialog, "", "Current password:", QLineEdit::Password,
-                                                    QString(), &ok);
-      if (!ok || oldPass.isEmpty()) {
+      const auto oldPass = promptPasswordValue(&dialog, "Current password:");
+      if (!oldPass.has_value() || oldPass->isEmpty()) {
         return;
       }
-      const QString newPass = QInputDialog::getText(&dialog, "", "New password:", QLineEdit::Password, QString(),
-                                                    &ok);
-      if (!ok || newPass.isEmpty()) {
+      const auto newPass = promptPasswordValue(&dialog, "New password:");
+      if (!newPass.has_value() || newPass->isEmpty()) {
         return;
       }
-      const QString confirm = QInputDialog::getText(&dialog, "", "Confirm new password:", QLineEdit::Password,
-                                                    QString(), &ok);
-      if (!ok || confirm.isEmpty()) {
+      const auto confirm = promptPasswordValue(&dialog, "Confirm new password:");
+      if (!confirm.has_value() || confirm->isEmpty()) {
         return;
       }
-      if (newPass != confirm) {
+      if (newPass.value() != confirm.value()) {
         QMessageBox::warning(&dialog, "Change Password", "New passwords do not match.");
         continue;
       }
-      if (!vaultManager_->rotatePassphrase(oldPass, newPass)) {
+      if (!vaultManager_->rotatePassphrase(oldPass.value(), newPass.value())) {
         QMessageBox::warning(&dialog, "Change Password",
                              "Failed to change password. Check current password and policy requirements.");
         return;
@@ -1607,25 +2047,22 @@ bool MainWindow::ensureVaultUnlocked() {
   }
 
   if (vaultManager_->state() == vaultrdp::core::VaultState::Disabled) {
-    bool ok = false;
-    const QString passphrase = QInputDialog::getText(this, "", "Set master passphrase:",
-                                                     QLineEdit::Password, QString(), &ok);
-    if (!ok || passphrase.isEmpty()) {
+    const auto passphrase = promptPasswordValue(this, "Set master passphrase:");
+    if (!passphrase.has_value() || passphrase->isEmpty()) {
       return false;
     }
 
-    const QString confirm = QInputDialog::getText(this, "", "Confirm master passphrase:",
-                                                  QLineEdit::Password, QString(), &ok);
-    if (!ok || confirm.isEmpty()) {
+    const auto confirm = promptPasswordValue(this, "Confirm master passphrase:");
+    if (!confirm.has_value() || confirm->isEmpty()) {
       return false;
     }
 
-    if (passphrase != confirm) {
+    if (passphrase.value() != confirm.value()) {
       QMessageBox::warning(this, "Enable Vault", "Passphrases do not match.");
       return false;
     }
 
-    if (!vaultManager_->enable(passphrase)) {
+    if (!vaultManager_->enable(passphrase.value())) {
       QMessageBox::warning(this, "Enable Vault",
                            "Failed to enable vault. Passphrase must include uppercase, lowercase, and number.");
       updateVaultStatus();
@@ -1637,14 +2074,12 @@ bool MainWindow::ensureVaultUnlocked() {
   }
 
   while (true) {
-    bool ok = false;
-    const QString passphrase =
-        QInputDialog::getText(this, "", "Master passphrase:", QLineEdit::Password, QString(), &ok);
-    if (!ok || passphrase.isEmpty()) {
+    const auto passphrase = promptPasswordValue(this, "Master passphrase:");
+    if (!passphrase.has_value() || passphrase->isEmpty()) {
       return false;
     }
 
-    if (vaultManager_->unlock(passphrase)) {
+    if (vaultManager_->unlock(passphrase.value())) {
       updateVaultStatus();
       return true;
     }
@@ -1738,28 +2173,25 @@ void MainWindow::maybeRunFirstStartupEncryptionWizard() {
         return;
       }
 
-      bool ok = false;
-      const QString passphrase = QInputDialog::getText(this, "", "Set vault password:", QLineEdit::Password,
-                                                       QString(), &ok);
-      if (!ok || passphrase.isEmpty()) {
+      const auto passphrase = promptPasswordValue(this, "Set vault password:");
+      if (!passphrase.has_value() || passphrase->isEmpty()) {
         // Back to Enable/Skip prompt.
         continue;
       }
 
-      const QString confirm = QInputDialog::getText(this, "", "Confirm vault password:", QLineEdit::Password,
-                                                    QString(), &ok);
-      if (!ok || confirm.isEmpty()) {
+      const auto confirm = promptPasswordValue(this, "Confirm vault password:");
+      if (!confirm.has_value() || confirm->isEmpty()) {
         // Back to Enable/Skip prompt.
         continue;
       }
 
-      if (passphrase != confirm) {
+      if (passphrase.value() != confirm.value()) {
         QMessageBox::warning(this, "Enable Encryption", "Passwords do not match.");
         // Back to Enable/Skip prompt.
         continue;
       }
 
-      if (!vaultManager_->enable(passphrase)) {
+      if (!vaultManager_->enable(passphrase.value())) {
         QMessageBox::warning(this, "Enable Encryption",
                              "Failed to enable encryption. Password must satisfy policy.");
       }

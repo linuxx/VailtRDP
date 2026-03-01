@@ -7,6 +7,7 @@ class QWidget;
 namespace vaultrdp::ui {
 
 enum class AppIcon {
+  Brand,
   Vault,
   Folder,
   Connection,
