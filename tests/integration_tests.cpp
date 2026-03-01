@@ -260,7 +260,8 @@ bool runRepositoryMoveAndGatewayScopeIntegration() {
 
   const auto folderA = folderRepo.createFolder("FolderA", std::nullopt);
   const auto folderB = folderRepo.createFolder("FolderB", std::nullopt);
-  if (!check(folderA.has_value() && folderB.has_value(), "folders created")) {
+  const auto folderC = folderRepo.createFolder("FolderC", std::nullopt);
+  if (!check(folderA.has_value() && folderB.has_value() && folderC.has_value(), "folders created")) {
     return false;
   }
 
@@ -354,6 +355,20 @@ bool runRepositoryMoveAndGatewayScopeIntegration() {
   if (!check(hasScopedInB && hasGlobalInB, "gateway root-scope filtering behavior correct")) {
     return false;
   }
+  const auto optionsInFolderC = vaultrdp::ui::gatewayOptionsForFolder(allGateways, folderC->id, allFoldersForScope);
+  bool hasScopedInC = false;
+  bool hasGlobalInC = false;
+  for (const auto& opt : optionsInFolderC) {
+    if (opt.first == scopedGateway->id) {
+      hasScopedInC = true;
+    }
+    if (opt.first == globalGateway->id) {
+      hasGlobalInC = true;
+    }
+  }
+  if (!check(!hasScopedInC && hasGlobalInC, "gateway root-scope blocks cross-root scoped references")) {
+    return false;
+  }
 
   const auto maybeGlobalSecretId = secretRepo.createPasswordSecret("Pass123B", &vault);
   if (!check(maybeGlobalSecretId.has_value(), "global credential secret created")) {
@@ -383,6 +398,22 @@ bool runRepositoryMoveAndGatewayScopeIntegration() {
   }
   if (!check(hasScopedCredentialInB && hasGlobalCredentialInB,
              "credential root-scope filtering behavior correct")) {
+    return false;
+  }
+  const auto credentialOptionsInFolderC =
+      vaultrdp::ui::credentialOptionsForFolder(allCredentials, folderC->id, allFoldersForScope);
+  bool hasScopedCredentialInC = false;
+  bool hasGlobalCredentialInC = false;
+  for (const auto& opt : credentialOptionsInFolderC) {
+    if (opt.first == scopedCredential->id) {
+      hasScopedCredentialInC = true;
+    }
+    if (opt.first == globalCredential->id) {
+      hasGlobalCredentialInC = true;
+    }
+  }
+  if (!check(!hasScopedCredentialInC && hasGlobalCredentialInC,
+             "credential root-scope blocks cross-root scoped references")) {
     return false;
   }
 

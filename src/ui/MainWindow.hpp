@@ -62,6 +62,9 @@ class MainWindow : public QMainWindow {
   void restoreUiSettings();
   void persistUiSettings() const;
   void updateCreateActionAvailability();
+  QString treeItemKey(const QModelIndex& index) const;
+  void captureTreeState(QStringList* expandedKeys, QString* selectedKey) const;
+  void restoreTreeState(const QStringList& expandedKeys, const QString& selectedKey);
   void setupUi();
   void setupMenuBar();
   void setupToolBar();

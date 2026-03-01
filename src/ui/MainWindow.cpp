@@ -24,6 +24,7 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QSplitter>
@@ -39,6 +40,8 @@
 #include <QWidget>
 #include <QDebug>
 
+#include <functional>
+
 #include "core/DatabaseManager.hpp"
 #include "core/VaultManager.hpp"
 #include "core/model/Entities.hpp"
@@ -51,6 +54,7 @@
 #include "protocols/RdpSession.hpp"
 #include "ui/FolderTreeView.hpp"
 #include "ui/GatewayScope.hpp"
+#include "ui/IconTheme.hpp"
 #include "ui/NewConnectionDialog.hpp"
 #include "ui/NewGatewayDialog.hpp"
 #include "ui/CredentialPromptDialog.hpp"
@@ -72,6 +76,7 @@ using vaultrdp::ui::kItemTypeRole;
 using vaultrdp::ui::kItemTypeVaultRoot;
 using vaultrdp::ui::gatewayOptionsForFolder;
 using vaultrdp::ui::credentialOptionsForFolder;
+using vaultrdp::ui::themedIcon;
 using vaultrdp::ui::makeSessionRuntimeOptionsJson;
 using vaultrdp::ui::parseSessionRuntimeOptions;
 using vaultrdp::ui::SessionRuntimeOptions;
@@ -362,6 +367,88 @@ void MainWindow::persistUiSettings() const {
   if (mainSplitter_ != nullptr) {
     settings.setValue("ui/main_splitter_sizes", QVariant::fromValue(mainSplitter_->sizes()));
   }
+
+  QStringList expandedKeys;
+  QString selectedKey;
+  captureTreeState(&expandedKeys, &selectedKey);
+  settings.setValue("ui/tree_expanded_keys", expandedKeys);
+  settings.setValue("ui/tree_selected_key", selectedKey);
+}
+
+QString MainWindow::treeItemKey(const QModelIndex& index) const {
+  if (!index.isValid()) {
+    return QString("%1:root").arg(kItemTypeVaultRoot);
+  }
+  const int itemType = index.data(kItemTypeRole).toInt();
+  QString itemId = index.data(kItemIdRole).toString().trimmed();
+  if (itemType == kItemTypeVaultRoot || itemId.isEmpty()) {
+    itemId = "root";
+  }
+  return QString("%1:%2").arg(itemType).arg(itemId);
+}
+
+void MainWindow::captureTreeState(QStringList* expandedKeys, QString* selectedKey) const {
+  if (expandedKeys == nullptr || selectedKey == nullptr || folderTreeView_ == nullptr || folderTreeModel_ == nullptr) {
+    return;
+  }
+
+  expandedKeys->clear();
+  selectedKey->clear();
+
+  if (folderTreeView_->selectionModel() != nullptr) {
+    *selectedKey = treeItemKey(folderTreeView_->selectionModel()->currentIndex());
+  }
+
+  std::function<void(const QModelIndex&)> walk = [&](const QModelIndex& parent) {
+    const int rows = folderTreeModel_->rowCount(parent);
+    for (int row = 0; row < rows; ++row) {
+      const QModelIndex index = folderTreeModel_->index(row, 0, parent);
+      if (!index.isValid()) {
+        continue;
+      }
+      if (folderTreeView_->isExpanded(index)) {
+        expandedKeys->push_back(treeItemKey(index));
+      }
+      walk(index);
+    }
+  };
+  walk(QModelIndex());
+}
+
+void MainWindow::restoreTreeState(const QStringList& expandedKeys, const QString& selectedKey) {
+  if (folderTreeView_ == nullptr || folderTreeModel_ == nullptr) {
+    return;
+  }
+
+  const QSet<QString> expandedSet(expandedKeys.begin(), expandedKeys.end());
+  QModelIndex selectedIndex;
+
+  std::function<void(const QModelIndex&)> walk = [&](const QModelIndex& parent) {
+    const int rows = folderTreeModel_->rowCount(parent);
+    for (int row = 0; row < rows; ++row) {
+      const QModelIndex index = folderTreeModel_->index(row, 0, parent);
+      if (!index.isValid()) {
+        continue;
+      }
+
+      const QString key = treeItemKey(index);
+      if (expandedSet.contains(key)) {
+        folderTreeView_->setExpanded(index, true);
+      }
+      if (!selectedKey.isEmpty() && key == selectedKey) {
+        selectedIndex = index;
+      }
+      walk(index);
+    }
+  };
+  walk(QModelIndex());
+
+  if (!selectedIndex.isValid()) {
+    selectedIndex = folderTreeModel_->index(0, 0);
+  }
+  if (selectedIndex.isValid()) {
+    folderTreeView_->setCurrentIndex(selectedIndex);
+  }
 }
 
 void MainWindow::updateCreateActionAvailability() {
@@ -530,17 +617,25 @@ bool MainWindow::validateMoveByScopeRules(int itemType, const QString& itemId,
 void MainWindow::setupMenuBar() {
   auto* fileMenu = menuBar()->addMenu("&File");
   newFolderAction_ = fileMenu->addAction("New Root Folder", this, &MainWindow::createFolder);
+  newFolderAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewFolder, this));
   newConnectionAction_ = fileMenu->addAction("New Connection", this, &MainWindow::createConnection);
+  newConnectionAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewConnection, this));
   newCredentialAction_ = fileMenu->addAction("New Credential Set", this, &MainWindow::createCredential);
+  newCredentialAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewCredential, this));
   newGatewayAction_ = fileMenu->addAction("New Gateway", this, &MainWindow::createGateway);
+  newGatewayAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewGateway, this));
   fileMenu->addSeparator();
   fileMenu->addAction("Exit", this, &QWidget::close);
 
   auto* editMenu = menuBar()->addMenu("&Edit");
-  editMenu->addAction("Edit Selected", this, &MainWindow::editSelectedItem);
-  editMenu->addAction("Duplicate");
-  editMenu->addAction("Delete");
-  editMenu->addAction("Rename");
+  auto* editAction = editMenu->addAction("Edit Selected", this, &MainWindow::editSelectedItem);
+  editAction->setIcon(themedIcon(vaultrdp::ui::AppIcon::Edit, this));
+  auto* duplicateAction = editMenu->addAction("Duplicate");
+  duplicateAction->setIcon(themedIcon(vaultrdp::ui::AppIcon::Duplicate, this));
+  auto* deleteAction = editMenu->addAction("Delete");
+  deleteAction->setIcon(themedIcon(vaultrdp::ui::AppIcon::Delete, this));
+  auto* renameAction = editMenu->addAction("Rename");
+  renameAction->setIcon(themedIcon(vaultrdp::ui::AppIcon::Rename, this));
 
   auto* viewMenu = menuBar()->addMenu("&View");
   viewMenu->addAction("Expand All", folderTreeView_, &QTreeView::expandAll);
@@ -548,15 +643,20 @@ void MainWindow::setupMenuBar() {
 
   auto* sessionMenu = menuBar()->addMenu("&Session");
   connectAction_ = sessionMenu->addAction("Connect", this, &MainWindow::connectSelectedConnection);
+  connectAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Connect, this));
   disconnectAction_ = sessionMenu->addAction("Disconnect", this, &MainWindow::disconnectCurrentSession);
+  disconnectAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Disconnect, this));
   disconnectAllAction_ = sessionMenu->addAction("Disconnect All", this, &MainWindow::disconnectAllSessions);
+  disconnectAllAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Disconnect, this));
 
   auto* vaultMenu = menuBar()->addMenu("&Vault");
   lockVaultAction_ = vaultMenu->addAction("Lock Vault", [this]() {
     vaultManager_->lock();
     updateVaultStatus();
   });
-  vaultMenu->addAction("Vault Settings...", this, &MainWindow::showVaultSettingsDialog);
+  lockVaultAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Lock, this));
+  auto* vaultSettingsAction = vaultMenu->addAction("Vault Settings...", this, &MainWindow::showVaultSettingsDialog);
+  vaultSettingsAction->setIcon(themedIcon(vaultrdp::ui::AppIcon::Settings, this));
 
   auto* helpMenu = menuBar()->addMenu("&Help");
   helpMenu->addAction("About VaultRDP");
@@ -577,10 +677,21 @@ void MainWindow::setupToolBar() {
 }
 
 void MainWindow::reloadFolderTree() {
+  QStringList expandedKeys;
+  QString selectedKey;
+  captureTreeState(&expandedKeys, &selectedKey);
+  if (expandedKeys.isEmpty() && selectedKey.isEmpty()) {
+    QSettings settings;
+    expandedKeys = settings.value("ui/tree_expanded_keys").toStringList();
+    selectedKey = settings.value("ui/tree_selected_key").toString();
+  }
+
   isReloadingTree_ = true;
+  QSignalBlocker modelBlocker(folderTreeModel_);
   folderTreeModel_->removeRows(0, folderTreeModel_->rowCount());
 
   auto* vaultRoot = new QStandardItem("Vault");
+  vaultRoot->setIcon(themedIcon(vaultrdp::ui::AppIcon::Vault, this));
   vaultRoot->setEditable(false);
   vaultRoot->setDragEnabled(false);
   vaultRoot->setDropEnabled(true);
@@ -597,6 +708,7 @@ void MainWindow::reloadFolderTree() {
   QHash<QString, QStandardItem*> folderItemById;
   for (const auto& folder : folders) {
     auto* folderItem = new QStandardItem(folder.name);
+    folderItem->setIcon(themedIcon(vaultrdp::ui::AppIcon::Folder, this));
     folderItem->setEditable(true);
     folderItem->setDragEnabled(true);
     folderItem->setDropEnabled(true);
@@ -624,6 +736,7 @@ void MainWindow::reloadFolderTree() {
 
   for (const auto& connection : connections) {
     auto* item = new QStandardItem(connection.name);
+    item->setIcon(themedIcon(vaultrdp::ui::AppIcon::Connection, this));
     item->setEditable(true);
     item->setDragEnabled(true);
     item->setDropEnabled(false);
@@ -641,6 +754,7 @@ void MainWindow::reloadFolderTree() {
 
   for (const auto& credential : credentials) {
     auto* item = new QStandardItem(credential.name);
+    item->setIcon(themedIcon(vaultrdp::ui::AppIcon::Credential, this));
     item->setEditable(true);
     item->setDragEnabled(true);
     item->setDropEnabled(false);
@@ -658,6 +772,7 @@ void MainWindow::reloadFolderTree() {
 
   for (const auto& gateway : gateways) {
     auto* item = new QStandardItem(gateway.name);
+    item->setIcon(themedIcon(vaultrdp::ui::AppIcon::Gateway, this));
     item->setEditable(true);
     item->setDragEnabled(true);
     item->setDropEnabled(false);
@@ -673,9 +788,12 @@ void MainWindow::reloadFolderTree() {
     }
   }
 
-  folderTreeView_->expandAll();
-  if (folderTreeView_->selectionModel() != nullptr) {
-    folderTreeView_->setCurrentIndex(folderTreeModel_->index(0, 0));
+  restoreTreeState(expandedKeys, selectedKey);
+  if (expandedKeys.isEmpty()) {
+    const QModelIndex rootIndex = folderTreeModel_->index(0, 0);
+    if (rootIndex.isValid()) {
+      folderTreeView_->setExpanded(rootIndex, true);
+    }
   }
   updateCreateActionAvailability();
   isReloadingTree_ = false;

@@ -44,6 +44,7 @@ add_executable(vaultrdp
   src/system/ScreenLockMonitor.cpp
   src/ui/MainWindowInteraction.cpp
   src/ui/MainWindow.cpp
+  src/ui/IconTheme.cpp
   src/ui/CredentialScope.cpp
   src/ui/RootScope.cpp
   src/ui/NewCredentialDialog.cpp
