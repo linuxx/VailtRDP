@@ -1,0 +1,6 @@
+<RCC>
+  <qresource prefix="/">
+    <file>icons/vaultrdp.png</file>
+    <file>icons/vaultrdp.ico</file>
+  </qresource>
+</RCC>
