@@ -61,15 +61,18 @@ class MainWindow : public QMainWindow {
  private:
   void restoreUiSettings();
   void persistUiSettings() const;
+  void updateCreateActionAvailability();
   void setupUi();
   void setupMenuBar();
   void setupToolBar();
   void reloadFolderTree();
   void createFolder();
   void createConnection();
+  void createCredential();
   void createGateway();
   void editSelectedItem();
   void editSelectedConnection();
+  void editSelectedCredential();
   void editSelectedGateway();
   void showVaultSettingsDialog();
   bool ensureVaultUnlocked();
@@ -79,6 +82,7 @@ class MainWindow : public QMainWindow {
   void maybePromptUnlockOnStartup();
   std::optional<QString> selectedFolderId() const;
   std::optional<QString> selectedConnectionId() const;
+  std::optional<QString> selectedCredentialId() const;
   std::optional<QString> selectedGatewayId() const;
   void connectSelectedConnection();
   bool promptForCredentials(const std::optional<QString>& suggestedUsername,
@@ -92,6 +96,7 @@ class MainWindow : public QMainWindow {
   void showTreeContextMenu(const QPoint& pos);
   void renameSelectedItem();
   void duplicateSelectedConnection();
+  void duplicateSelectedCredential();
   void duplicateSelectedGateway();
   void deleteSelectedItem();
   void copySelectedHostname();
@@ -106,6 +111,8 @@ class MainWindow : public QMainWindow {
   void ensureWelcomeTab();
   std::optional<QString> currentSessionConnectionId() const;
   void syncClipboardToFocusedSession();
+  bool validateMoveByScopeRules(int itemType, const QString& itemId, const std::optional<QString>& destinationFolderId,
+                                QString* messageOut) const;
 
   DatabaseManager* databaseManager_;
   vaultrdp::core::VaultManager* vaultManager_;
@@ -119,6 +126,8 @@ class MainWindow : public QMainWindow {
   QTabWidget* sessionTabWidget_;
   QAction* newFolderAction_;
   QAction* newConnectionAction_;
+  QAction* newGatewayAction_;
+  QAction* newCredentialAction_;
   QAction* connectAction_;
   QAction* disconnectAction_;
   QAction* disconnectAllAction_;

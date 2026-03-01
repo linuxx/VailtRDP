@@ -6,7 +6,6 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
-#include <QDropEvent>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGuiApplication>
@@ -14,10 +13,9 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QInputDialog>
+#include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QMenuBar>
 #include <QMenu>
 #include <QMessageBox>
@@ -41,8 +39,6 @@
 #include <QWidget>
 #include <QDebug>
 
-#include <functional>
-
 #include "core/DatabaseManager.hpp"
 #include "core/VaultManager.hpp"
 #include "core/model/Entities.hpp"
@@ -53,163 +49,32 @@
 #include "core/repository/SecretRepository.hpp"
 #include "protocols/ISession.hpp"
 #include "protocols/RdpSession.hpp"
+#include "ui/FolderTreeView.hpp"
+#include "ui/GatewayScope.hpp"
 #include "ui/NewConnectionDialog.hpp"
 #include "ui/NewGatewayDialog.hpp"
+#include "ui/CredentialPromptDialog.hpp"
+#include "ui/CredentialScope.hpp"
+#include "ui/RootScope.hpp"
+#include "ui/SessionRuntimeOptions.hpp"
 #include "ui/SessionTabContent.hpp"
+#include "ui/TreeItemRoles.hpp"
+#include "ui/NewCredentialDialog.hpp"
 
 namespace {
-constexpr int kItemTypeRole = Qt::UserRole + 100;
-constexpr int kItemIdRole = Qt::UserRole + 101;
-constexpr int kItemFolderIdRole = Qt::UserRole + 102;
-
-constexpr int kItemTypeFolder = 1;
-constexpr int kItemTypeConnection = 2;
-constexpr int kItemTypeVaultRoot = 3;
-constexpr int kItemTypeGateway = 4;
-
-struct SessionRuntimeOptions {
-  bool enableClipboard = true;
-  bool mapHomeDrive = true;
-  QString lastSuccessfulUsername;
-};
-
-SessionRuntimeOptions parseSessionRuntimeOptions(const QString& optionsJson) {
-  SessionRuntimeOptions options;
-  const QByteArray utf8 = optionsJson.toUtf8();
-  if (utf8.trimmed().isEmpty()) {
-    return options;
-  }
-
-  QJsonParseError error;
-  const QJsonDocument doc = QJsonDocument::fromJson(utf8, &error);
-  if (error.error != QJsonParseError::NoError || !doc.isObject()) {
-    return options;
-  }
-
-  const QJsonObject obj = doc.object();
-  if (obj.contains("enableClipboard") && obj.value("enableClipboard").isBool()) {
-    options.enableClipboard = obj.value("enableClipboard").toBool();
-  }
-  if (obj.contains("mapHomeDrive") && obj.value("mapHomeDrive").isBool()) {
-    options.mapHomeDrive = obj.value("mapHomeDrive").toBool();
-  }
-  if (obj.contains("lastSuccessfulUsername") && obj.value("lastSuccessfulUsername").isString()) {
-    options.lastSuccessfulUsername = obj.value("lastSuccessfulUsername").toString().trimmed();
-  }
-  return options;
-}
-
-QString makeSessionRuntimeOptionsJson(bool enableClipboard, bool mapHomeDrive,
-                                      const QString& lastSuccessfulUsername = QString()) {
-  QJsonObject obj;
-  obj.insert("enableClipboard", enableClipboard);
-  obj.insert("mapHomeDrive", mapHomeDrive);
-  if (!lastSuccessfulUsername.trimmed().isEmpty()) {
-    obj.insert("lastSuccessfulUsername", lastSuccessfulUsername.trimmed());
-  }
-  return QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Compact));
-}
-
-bool gatewayVisibleForFolder(const vaultrdp::model::Gateway& gateway, const std::optional<QString>& folderId) {
-  if (gateway.allowAnyFolder) {
-    return true;
-  }
-  if (!folderId.has_value() || folderId->trimmed().isEmpty()) {
-    return !gateway.folderId.has_value() || gateway.folderId->trimmed().isEmpty();
-  }
-  return gateway.folderId.has_value() && gateway.folderId->trimmed() == folderId->trimmed();
-}
-
-std::vector<std::pair<QString, QString>> gatewayOptionsForFolder(
-    const std::vector<vaultrdp::model::Gateway>& gateways, const std::optional<QString>& folderId,
-    const std::optional<QString>& forceIncludeGatewayId = std::nullopt) {
-  std::vector<std::pair<QString, QString>> out;
-  out.reserve(gateways.size());
-  for (const auto& gateway : gateways) {
-    const bool forceInclude = forceIncludeGatewayId.has_value() && gateway.id == forceIncludeGatewayId.value();
-    if (forceInclude || gatewayVisibleForFolder(gateway, folderId)) {
-      out.emplace_back(gateway.id, gateway.name);
-    }
-  }
-  return out;
-}
-
-std::optional<QString> parentFolderIdForIndex(const QModelIndex& parentIndex) {
-  if (!parentIndex.isValid()) {
-    return std::nullopt;
-  }
-  if (parentIndex.data(kItemTypeRole).toInt() != kItemTypeFolder) {
-    return std::nullopt;
-  }
-  const QString id = parentIndex.data(kItemIdRole).toString().trimmed();
-  if (id.isEmpty()) {
-    return std::nullopt;
-  }
-  return id;
-}
-
-class FolderTreeView : public QTreeView {
- public:
-  struct DragPayload {
-    int itemType = 0;
-    QString itemId;
-    std::optional<QString> sourceFolderId;
-  };
-  using DropCallback = std::function<void(const DragPayload&, const std::optional<QString>& destinationFolderId)>;
-
-  explicit FolderTreeView(QWidget* parent = nullptr) : QTreeView(parent) {}
-
-  void setDropCallback(DropCallback callback) { dropCallback_ = std::move(callback); }
-
- protected:
-  void startDrag(Qt::DropActions supportedActions) override {
-    dragPayload_ = DragPayload();
-    const QModelIndex index = currentIndex();
-    if (index.isValid()) {
-      dragPayload_.itemType = index.data(kItemTypeRole).toInt();
-      dragPayload_.itemId = index.data(kItemIdRole).toString().trimmed();
-      dragPayload_.sourceFolderId = parentFolderIdForIndex(index.parent());
-    }
-    QTreeView::startDrag(supportedActions);
-  }
-
-  void dropEvent(QDropEvent* event) override {
-    const QModelIndex dropIndex = indexAt(event->position().toPoint());
-    const auto dropPos = dropIndicatorPosition();
-    QTreeView::dropEvent(event);
-
-    if (!dropCallback_.has_value()) {
-      return;
-    }
-    if (dragPayload_.itemId.isEmpty()) {
-      return;
-    }
-
-    const std::optional<QString> destinationFolderId = destinationFolderFromDrop(dropIndex, dropPos);
-    dropCallback_.value()(dragPayload_, destinationFolderId);
-  }
-
- private:
-  std::optional<QString> destinationFolderFromDrop(const QModelIndex& dropIndex,
-                                                   DropIndicatorPosition dropPosition) const {
-    if (dropPosition == OnViewport) {
-      return std::nullopt;
-    }
-
-    if (dropPosition == OnItem && dropIndex.isValid() && dropIndex.data(kItemTypeRole).toInt() == kItemTypeFolder) {
-      const QString folderId = dropIndex.data(kItemIdRole).toString().trimmed();
-      if (!folderId.isEmpty()) {
-        return folderId;
-      }
-      return std::nullopt;
-    }
-
-    return parentFolderIdForIndex(dropIndex.parent());
-  }
-
-  DragPayload dragPayload_;
-  std::optional<DropCallback> dropCallback_;
-};
+using vaultrdp::ui::kItemFolderIdRole;
+using vaultrdp::ui::kItemIdRole;
+using vaultrdp::ui::kItemTypeConnection;
+using vaultrdp::ui::kItemTypeCredential;
+using vaultrdp::ui::kItemTypeFolder;
+using vaultrdp::ui::kItemTypeGateway;
+using vaultrdp::ui::kItemTypeRole;
+using vaultrdp::ui::kItemTypeVaultRoot;
+using vaultrdp::ui::gatewayOptionsForFolder;
+using vaultrdp::ui::credentialOptionsForFolder;
+using vaultrdp::ui::makeSessionRuntimeOptionsJson;
+using vaultrdp::ui::parseSessionRuntimeOptions;
+using vaultrdp::ui::SessionRuntimeOptions;
 }  // namespace
 
 MainWindow::MainWindow(DatabaseManager* databaseManager, vaultrdp::core::VaultManager* vaultManager,
@@ -227,6 +92,8 @@ MainWindow::MainWindow(DatabaseManager* databaseManager, vaultrdp::core::VaultMa
       sessionTabWidget_(nullptr),
       newFolderAction_(nullptr),
       newConnectionAction_(nullptr),
+      newGatewayAction_(nullptr),
+      newCredentialAction_(nullptr),
       connectAction_(nullptr),
       disconnectAction_(nullptr),
       disconnectAllAction_(nullptr),
@@ -266,7 +133,7 @@ void MainWindow::setupUi() {
   layout->setContentsMargins(0, 0, 0, 0);
 
   mainSplitter_ = new QSplitter(Qt::Horizontal, centralWidget);
-  auto* dragTreeView = new FolderTreeView(mainSplitter_);
+  auto* dragTreeView = new vaultrdp::ui::FolderTreeView(mainSplitter_);
   folderTreeView_ = dragTreeView;
   folderTreeView_->setHeaderHidden(true);
   folderTreeView_->header()->setStretchLastSection(true);
@@ -285,16 +152,28 @@ void MainWindow::setupUi() {
   folderTreeModel_->setHorizontalHeaderLabels({"VaultRDP"});
   folderTreeView_->setModel(folderTreeModel_);
   connect(folderTreeModel_, &QStandardItemModel::itemChanged, this, &MainWindow::onTreeItemChanged);
-  dragTreeView->setDropCallback([this](const FolderTreeView::DragPayload& payload,
+  connect(folderTreeView_->selectionModel(), &QItemSelectionModel::currentChanged, this,
+          [this](const QModelIndex&, const QModelIndex&) { updateCreateActionAvailability(); });
+  dragTreeView->setDropCallback([this](const vaultrdp::ui::FolderTreeView::DragPayload& payload,
                                        const std::optional<QString>& destinationFolderId) {
+    const auto scheduleReload = [this]() {
+      QTimer::singleShot(0, this, [this]() { reloadFolderTree(); });
+    };
     if (isReloadingTree_) {
       return;
     }
     if (payload.itemType != kItemTypeFolder && payload.itemType != kItemTypeConnection &&
-        payload.itemType != kItemTypeGateway) {
+        payload.itemType != kItemTypeGateway && payload.itemType != kItemTypeCredential) {
       return;
     }
     if (payload.sourceFolderId == destinationFolderId) {
+      return;
+    }
+
+    QString moveValidationMessage;
+    if (!validateMoveByScopeRules(payload.itemType, payload.itemId, destinationFolderId, &moveValidationMessage)) {
+      QMessageBox::warning(this, "Move Blocked", moveValidationMessage);
+      scheduleReload();
       return;
     }
 
@@ -303,6 +182,9 @@ void MainWindow::setupUi() {
     if (payload.itemType == kItemTypeConnection) {
       ok = connectionRepository_->moveConnectionToFolder(payload.itemId, destinationFolderId);
       failureTitle = "Move Connection";
+    } else if (payload.itemType == kItemTypeCredential) {
+      ok = credentialRepository_->moveCredentialToFolder(payload.itemId, destinationFolderId);
+      failureTitle = "Move Credential Set";
     } else if (payload.itemType == kItemTypeGateway) {
       ok = gatewayRepository_->moveGatewayToFolder(payload.itemId, destinationFolderId);
       failureTitle = "Move Gateway";
@@ -314,7 +196,7 @@ void MainWindow::setupUi() {
     if (!ok) {
       QMessageBox::warning(this, failureTitle, "Move failed.");
     }
-    reloadFolderTree();
+    scheduleReload();
   });
 
   sessionTabWidget_ = new QTabWidget(mainSplitter_);
@@ -332,8 +214,15 @@ void MainWindow::setupUi() {
   sessionTabWidget_->addTab(welcomeTab_, "Welcome");
   connect(sessionTabWidget_, &QTabWidget::tabCloseRequested, this, &MainWindow::handleTabCloseRequested);
   connect(sessionTabWidget_, &QTabWidget::currentChanged, this, [this](int) { syncClipboardToFocusedSession(); });
-  connect(folderTreeView_, &QTreeView::doubleClicked, [this](const QModelIndex&) {
-    connectSelectedConnection();
+  connect(folderTreeView_, &QTreeView::doubleClicked, [this](const QModelIndex& index) {
+    const int itemType = index.data(kItemTypeRole).toInt();
+    if (itemType == kItemTypeConnection) {
+      connectSelectedConnection();
+    } else if (itemType == kItemTypeGateway) {
+      editSelectedGateway();
+    } else if (itemType == kItemTypeCredential) {
+      editSelectedCredential();
+    }
   });
 
   if (QGuiApplication::clipboard() != nullptr) {
@@ -475,11 +364,175 @@ void MainWindow::persistUiSettings() const {
   }
 }
 
+void MainWindow::updateCreateActionAvailability() {
+  const QModelIndex index = folderTreeView_ != nullptr ? folderTreeView_->currentIndex() : QModelIndex();
+  const int itemType = index.isValid() ? index.data(kItemTypeRole).toInt() : kItemTypeVaultRoot;
+  const bool atVaultLevel = !index.isValid() || itemType == kItemTypeVaultRoot;
+
+  if (newFolderAction_ != nullptr) {
+    newFolderAction_->setText(atVaultLevel ? "New Root Folder" : "New Subfolder");
+    newFolderAction_->setEnabled(true);
+  }
+  if (newConnectionAction_ != nullptr) {
+    newConnectionAction_->setEnabled(!atVaultLevel);
+  }
+  if (newCredentialAction_ != nullptr) {
+    newCredentialAction_->setEnabled(!atVaultLevel);
+  }
+  if (newGatewayAction_ != nullptr) {
+    newGatewayAction_->setEnabled(!atVaultLevel);
+  }
+}
+
+bool MainWindow::validateMoveByScopeRules(int itemType, const QString& itemId,
+                                          const std::optional<QString>& destinationFolderId,
+                                          QString* messageOut) const {
+  auto fail = [&](const QString& message) {
+    if (messageOut != nullptr) {
+      *messageOut = message;
+    }
+    return false;
+  };
+
+  if (itemType != kItemTypeFolder && (!destinationFolderId.has_value() || destinationFolderId->trimmed().isEmpty())) {
+    return fail(
+        "This item must stay within a root folder. Select a destination root folder or subfolder.");
+  }
+
+  const auto folders = repository_->listFolders();
+  const auto connections = connectionRepository_->listConnections();
+  const auto gateways = gatewayRepository_->listGateways();
+  const auto credentials = credentialRepository_->listCredentials();
+
+  QHash<QString, vaultrdp::model::Gateway> gatewayById;
+  for (const auto& gateway : gateways) {
+    gatewayById.insert(gateway.id, gateway);
+  }
+  QHash<QString, vaultrdp::model::Credential> credentialById;
+  for (const auto& credential : credentials) {
+    credentialById.insert(credential.id, credential);
+  }
+
+  const auto folderRootMap = vaultrdp::ui::buildFolderRootMap(folders);
+
+  QSet<QString> movedSubtree;
+  std::optional<QString> movedFolderNewRoot;
+  if (itemType == kItemTypeFolder) {
+    movedSubtree.insert(itemId);
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (const auto& folder : folders) {
+        if (folder.parentId.has_value() && movedSubtree.contains(folder.parentId.value()) &&
+            !movedSubtree.contains(folder.id)) {
+          movedSubtree.insert(folder.id);
+          changed = true;
+        }
+      }
+    }
+
+    if (destinationFolderId.has_value() && !destinationFolderId->trimmed().isEmpty()) {
+      movedFolderNewRoot = vaultrdp::ui::rootForFolder(destinationFolderId, folderRootMap);
+    } else {
+      movedFolderNewRoot = itemId;
+    }
+  }
+
+  const auto destinationRoot = vaultrdp::ui::rootForFolder(destinationFolderId, folderRootMap);
+  auto rootForFolderAfterMove = [&](const std::optional<QString>& folderId) -> std::optional<QString> {
+    if (!folderId.has_value() || folderId->trimmed().isEmpty()) {
+      return std::nullopt;
+    }
+    if (itemType == kItemTypeFolder && movedFolderNewRoot.has_value() && movedSubtree.contains(folderId.value())) {
+      return movedFolderNewRoot;
+    }
+    return vaultrdp::ui::rootForFolder(folderId, folderRootMap);
+  };
+
+  auto rootForConnectionAfterMove = [&](const vaultrdp::model::Connection& connection) -> std::optional<QString> {
+    if (itemType == kItemTypeConnection && connection.id == itemId) {
+      return destinationRoot;
+    }
+    return rootForFolderAfterMove(std::optional<QString>(connection.folderId));
+  };
+  auto rootForGatewayAfterMove = [&](const vaultrdp::model::Gateway& gateway) -> std::optional<QString> {
+    if (itemType == kItemTypeGateway && gateway.id == itemId) {
+      return destinationRoot;
+    }
+    return rootForFolderAfterMove(gateway.folderId);
+  };
+  auto rootForCredentialAfterMove = [&](const vaultrdp::model::Credential& credential) -> std::optional<QString> {
+    if (itemType == kItemTypeCredential && credential.id == itemId) {
+      return destinationRoot;
+    }
+    return rootForFolderAfterMove(credential.folderId);
+  };
+
+  auto rootsMatchOrGlobal = [](const std::optional<QString>& leftRoot, const std::optional<QString>& rightRoot,
+                               bool allowAnywhere) {
+    return allowAnywhere || (leftRoot.has_value() && rightRoot.has_value() && leftRoot.value() == rightRoot.value());
+  };
+
+  for (const auto& connection : connections) {
+    const auto connectionRoot = rootForConnectionAfterMove(connection);
+    if (!connectionRoot.has_value()) {
+      return fail("Move blocked because it would leave one or more connections outside a root folder.");
+    }
+
+    if (connection.gatewayId.has_value()) {
+      const auto gatewayIt = gatewayById.find(connection.gatewayId.value());
+      if (gatewayIt != gatewayById.end()) {
+        const auto gatewayRoot = rootForGatewayAfterMove(gatewayIt.value());
+        if (!rootsMatchOrGlobal(connectionRoot, gatewayRoot, gatewayIt->allowAnyFolder)) {
+          return fail(
+              "Move blocked. This would break folder-scope relationships between connections and referenced "
+              "gateways/credential sets. Review linked items and either remove the relationship or enable "
+              "\"can be used from any folder\".");
+        }
+      }
+    }
+
+    if (connection.credentialId.has_value()) {
+      const auto credentialIt = credentialById.find(connection.credentialId.value());
+      if (credentialIt != credentialById.end()) {
+        const auto credentialRoot = rootForCredentialAfterMove(credentialIt.value());
+        if (!rootsMatchOrGlobal(connectionRoot, credentialRoot, credentialIt->allowAnyFolder)) {
+          return fail(
+              "Move blocked. This would break folder-scope relationships between connections and referenced "
+              "gateways/credential sets. Review linked items and either remove the relationship or enable "
+              "\"can be used from any folder\".");
+        }
+      }
+    }
+  }
+
+  for (const auto& gateway : gateways) {
+    if (!gateway.credentialId.has_value()) {
+      continue;
+    }
+    const auto credentialIt = credentialById.find(gateway.credentialId.value());
+    if (credentialIt == credentialById.end()) {
+      continue;
+    }
+    const auto gatewayRoot = rootForGatewayAfterMove(gateway);
+    const auto credentialRoot = rootForCredentialAfterMove(credentialIt.value());
+    if (!rootsMatchOrGlobal(gatewayRoot, credentialRoot, credentialIt->allowAnyFolder)) {
+      return fail(
+          "Move blocked. This would break folder-scope relationships between connections and referenced "
+          "gateways/credential sets. Review linked items and either remove the relationship or enable "
+          "\"can be used from any folder\".");
+    }
+  }
+
+  return true;
+}
+
 void MainWindow::setupMenuBar() {
   auto* fileMenu = menuBar()->addMenu("&File");
-  newFolderAction_ = fileMenu->addAction("New Folder", this, &MainWindow::createFolder);
+  newFolderAction_ = fileMenu->addAction("New Root Folder", this, &MainWindow::createFolder);
   newConnectionAction_ = fileMenu->addAction("New Connection", this, &MainWindow::createConnection);
-  fileMenu->addAction("New Gateway", this, &MainWindow::createGateway);
+  newCredentialAction_ = fileMenu->addAction("New Credential Set", this, &MainWindow::createCredential);
+  newGatewayAction_ = fileMenu->addAction("New Gateway", this, &MainWindow::createGateway);
   fileMenu->addSeparator();
   fileMenu->addAction("Exit", this, &QWidget::close);
 
@@ -515,6 +568,7 @@ void MainWindow::setupToolBar() {
 
   mainToolBar_->addAction(newFolderAction_);
   mainToolBar_->addAction(newConnectionAction_);
+  mainToolBar_->addAction(newCredentialAction_);
   mainToolBar_->addSeparator();
   mainToolBar_->addAction(connectAction_);
   mainToolBar_->addAction(disconnectAction_);
@@ -537,6 +591,7 @@ void MainWindow::reloadFolderTree() {
 
   const auto folders = repository_->listFolders();
   const auto connections = connectionRepository_->listConnections();
+  const auto credentials = credentialRepository_->listCredentials();
   const auto gateways = gatewayRepository_->listGateways();
 
   QHash<QString, QStandardItem*> folderItemById;
@@ -584,6 +639,23 @@ void MainWindow::reloadFolderTree() {
     }
   }
 
+  for (const auto& credential : credentials) {
+    auto* item = new QStandardItem(credential.name);
+    item->setEditable(true);
+    item->setDragEnabled(true);
+    item->setDropEnabled(false);
+    item->setData(kItemTypeCredential, kItemTypeRole);
+    item->setData(credential.id, kItemIdRole);
+    item->setData(credential.folderId.has_value() ? credential.folderId.value() : QString(), kItemFolderIdRole);
+    QStandardItem* folderParent =
+        credential.folderId.has_value() ? folderItemById.value(credential.folderId.value(), nullptr) : nullptr;
+    if (folderParent != nullptr) {
+      folderParent->appendRow(item);
+    } else {
+      vaultRoot->appendRow(item);
+    }
+  }
+
   for (const auto& gateway : gateways) {
     auto* item = new QStandardItem(gateway.name);
     item->setEditable(true);
@@ -602,6 +674,10 @@ void MainWindow::reloadFolderTree() {
   }
 
   folderTreeView_->expandAll();
+  if (folderTreeView_->selectionModel() != nullptr) {
+    folderTreeView_->setCurrentIndex(folderTreeModel_->index(0, 0));
+  }
+  updateCreateActionAvailability();
   isReloadingTree_ = false;
 }
 
@@ -623,9 +699,17 @@ void MainWindow::createFolder() {
 
 void MainWindow::createConnection() {
   qInfo() << "[ui] createConnection requested";
+  if (!selectedFolderId().has_value()) {
+    QMessageBox::information(this, "New Connection", "Select a root folder or subfolder first.");
+    return;
+  }
   NewConnectionDialog dialog(this);
+  const auto folders = repository_->listFolders();
   const auto gateways = gatewayRepository_->listGateways();
-  const auto gatewayOptions = gatewayOptionsForFolder(gateways, selectedFolderId());
+  const auto credentials = credentialRepository_->listCredentials();
+  const auto credentialOptions = credentialOptionsForFolder(credentials, selectedFolderId(), folders);
+  const auto gatewayOptions = gatewayOptionsForFolder(gateways, selectedFolderId(), folders);
+  dialog.setCredentialOptions(credentialOptions);
   dialog.setGatewayOptions(gatewayOptions);
   dialog.setInitialValues(QString(), QString(), 3389, QString(), QString(), QString(), true, true, true,
                           std::nullopt);
@@ -646,7 +730,14 @@ void MainWindow::createConnection() {
     return;
   }
 
-  if (dialog.saveCredential() && hasCredentialFields) {
+  if (dialog.useSavedCredentialSet()) {
+    if (!dialog.selectedCredentialSetId().has_value()) {
+      db.rollback();
+      QMessageBox::warning(this, "New Connection", "Select a saved credential set.");
+      return;
+    }
+    credentialId = dialog.selectedCredentialSetId();
+  } else if (dialog.saveCredential() && hasCredentialFields) {
     if (vaultManager_->state() == vaultrdp::core::VaultState::Locked && !ensureVaultUnlocked()) {
       db.rollback();
       QMessageBox::information(this, "Vault", "Vault must be unlocked to save credentials.");
@@ -694,11 +785,75 @@ void MainWindow::createConnection() {
   reloadFolderTree();
 }
 
+void MainWindow::createCredential() {
+  qInfo() << "[ui] createCredential requested";
+  if (!selectedFolderId().has_value()) {
+    QMessageBox::information(this, "New Credential Set", "Select a root folder or subfolder first.");
+    return;
+  }
+  NewCredentialDialog dialog(this);
+  dialog.setInitialValues(QString(), QString(), QString(), QString(), false);
+  if (dialog.exec() != QDialog::Accepted) {
+    return;
+  }
+
+  if (dialog.credentialName().isEmpty() || dialog.username().isEmpty() || dialog.password().isEmpty()) {
+    QMessageBox::warning(this, "New Credential Set", "Name, username, and password are required.");
+    return;
+  }
+
+  if (vaultManager_->state() == vaultrdp::core::VaultState::Locked && !ensureVaultUnlocked()) {
+    return;
+  }
+
+  QSqlDatabase db = databaseManager_->database();
+  if (!db.transaction()) {
+    QMessageBox::critical(this, "New Credential Set", "Failed to start database transaction.");
+    return;
+  }
+
+  const auto maybeSecretId = secretRepository_->createPasswordSecret(dialog.password(), vaultManager_);
+  if (!maybeSecretId.has_value()) {
+    db.rollback();
+    QMessageBox::critical(this, "New Credential Set", "Failed to store password.");
+    return;
+  }
+
+  std::optional<QString> domain;
+  if (!dialog.domain().isEmpty()) {
+    domain = dialog.domain();
+  }
+
+  const auto created =
+      credentialRepository_->createCredential(dialog.credentialName(), dialog.username(), domain, maybeSecretId.value(),
+                                             selectedFolderId(), dialog.allowAnyFolder());
+  if (!created.has_value()) {
+    db.rollback();
+    QMessageBox::critical(this, "New Credential Set", "Failed to create credential set.");
+    return;
+  }
+
+  if (!db.commit()) {
+    db.rollback();
+    QMessageBox::critical(this, "New Credential Set", "Failed to commit transaction.");
+    return;
+  }
+
+  reloadFolderTree();
+}
+
 void MainWindow::createGateway() {
   qInfo() << "[ui] createGateway requested";
+  if (!selectedFolderId().has_value()) {
+    QMessageBox::information(this, "New Gateway", "Select a root folder or subfolder first.");
+    return;
+  }
   NewGatewayDialog dialog(this);
+  const auto folders = repository_->listFolders();
+  const auto credentials = credentialRepository_->listCredentials();
+  dialog.setCredentialOptions(credentialOptionsForFolder(credentials, selectedFolderId(), folders));
   dialog.setInitialValues(QString(), QString(), 443, vaultrdp::model::GatewayCredentialMode::SameAsConnection,
-                          QString(), QString(), QString(), false);
+                          QString(), QString(), QString(), false, std::nullopt);
   if (dialog.exec() != QDialog::Accepted) {
     return;
   }
@@ -718,35 +873,43 @@ void MainWindow::createGateway() {
   }
 
   if (mode == vaultrdp::model::GatewayCredentialMode::SeparateSaved) {
-    if (dialog.username().isEmpty() || dialog.password().isEmpty()) {
+    if (dialog.useSavedCredentialSet()) {
+      if (!dialog.selectedCredentialSetId().has_value()) {
+        db.rollback();
+        QMessageBox::warning(this, "New Gateway", "Select a saved credential set.");
+        return;
+      }
+      credentialId = dialog.selectedCredentialSetId();
+    } else if (dialog.username().isEmpty() || dialog.password().isEmpty()) {
       db.rollback();
       QMessageBox::warning(this, "New Gateway",
                            "Username and password are required for Saved Credentials mode.");
       return;
+    } else {
+      if (vaultManager_->state() == vaultrdp::core::VaultState::Locked && !ensureVaultUnlocked()) {
+        db.rollback();
+        return;
+      }
+      const auto maybeSecretId = secretRepository_->createPasswordSecret(dialog.password(), vaultManager_);
+      if (!maybeSecretId.has_value()) {
+        db.rollback();
+        QMessageBox::critical(this, "New Gateway", "Failed to store gateway password.");
+        return;
+      }
+      std::optional<QString> domain;
+      if (!dialog.domain().isEmpty()) {
+        domain = dialog.domain();
+      }
+      const auto maybeCredential =
+          credentialRepository_->createCredential(dialog.gatewayName() + " Gateway Credential",
+                                                  dialog.username(), domain, maybeSecretId.value());
+      if (!maybeCredential.has_value()) {
+        db.rollback();
+        QMessageBox::critical(this, "New Gateway", "Failed to create gateway credential.");
+        return;
+      }
+      credentialId = maybeCredential->id;
     }
-    if (vaultManager_->state() == vaultrdp::core::VaultState::Locked && !ensureVaultUnlocked()) {
-      db.rollback();
-      return;
-    }
-    const auto maybeSecretId = secretRepository_->createPasswordSecret(dialog.password(), vaultManager_);
-    if (!maybeSecretId.has_value()) {
-      db.rollback();
-      QMessageBox::critical(this, "New Gateway", "Failed to store gateway password.");
-      return;
-    }
-    std::optional<QString> domain;
-    if (!dialog.domain().isEmpty()) {
-      domain = dialog.domain();
-    }
-    const auto maybeCredential =
-        credentialRepository_->createCredential(dialog.gatewayName() + " Gateway Credential",
-                                                dialog.username(), domain, maybeSecretId.value());
-    if (!maybeCredential.has_value()) {
-      db.rollback();
-      QMessageBox::critical(this, "New Gateway", "Failed to create gateway credential.");
-      return;
-    }
-    credentialId = maybeCredential->id;
   }
 
   const auto created = gatewayRepository_->createGateway(dialog.gatewayName(), dialog.host(), dialog.port(), mode,
@@ -785,10 +948,14 @@ void MainWindow::editSelectedConnection() {
   const SessionRuntimeOptions sessionOptions = parseSessionRuntimeOptions(connection.optionsJson);
 
   NewConnectionDialog dialog(this);
+  const auto folders = repository_->listFolders();
   const auto gateways = gatewayRepository_->listGateways();
+  const auto credentials = credentialRepository_->listCredentials();
   const std::optional<QString> editFolderId =
       connection.folderId.trimmed().isEmpty() ? std::nullopt : std::optional<QString>(connection.folderId);
-  const auto gatewayOptions = gatewayOptionsForFolder(gateways, editFolderId, connection.gatewayId);
+  const auto credentialOptions = credentialOptionsForFolder(credentials, editFolderId, folders, connection.credentialId);
+  const auto gatewayOptions = gatewayOptionsForFolder(gateways, editFolderId, folders, connection.gatewayId);
+  dialog.setCredentialOptions(credentialOptions);
   dialog.setGatewayOptions(gatewayOptions);
   dialog.setDialogTitle("Edit Connection");
   dialog.setInitialValues(connection.name, connection.host, connection.port,
@@ -800,7 +967,7 @@ void MainWindow::editSelectedConnection() {
                                                                                       : QString(),
                           connection.credentialId.has_value(),
                           sessionOptions.enableClipboard, sessionOptions.mapHomeDrive,
-                          connection.gatewayId);
+                          connection.gatewayId, connection.credentialId);
 
   if (dialog.exec() != QDialog::Accepted) {
     return;
@@ -824,7 +991,14 @@ void MainWindow::editSelectedConnection() {
   }
 
   const bool hasCredentialFields = !dialog.username().isEmpty() && !dialog.password().isEmpty();
-  if (!dialog.saveCredential()) {
+  if (dialog.useSavedCredentialSet()) {
+    if (!dialog.selectedCredentialSetId().has_value()) {
+      db.rollback();
+      QMessageBox::warning(this, "Edit Connection", "Select a saved credential set.");
+      return;
+    }
+    credentialId = dialog.selectedCredentialSetId();
+  } else if (!dialog.saveCredential()) {
     credentialId = std::nullopt;
   } else if (hasCredentialFields) {
     if (vaultManager_->state() == vaultrdp::core::VaultState::Locked && !ensureVaultUnlocked()) {
@@ -910,9 +1084,78 @@ void MainWindow::editSelectedItem() {
     editSelectedConnection();
     return;
   }
+  if (selectedCredentialId().has_value()) {
+    editSelectedCredential();
+    return;
+  }
   if (selectedGatewayId().has_value()) {
     editSelectedGateway();
   }
+}
+
+void MainWindow::editSelectedCredential() {
+  qInfo() << "[ui] editSelectedCredential requested";
+  const auto credentialId = selectedCredentialId();
+  if (!credentialId.has_value()) {
+    return;
+  }
+
+  const auto maybeCredential = credentialRepository_->findCredentialById(credentialId.value());
+  if (!maybeCredential.has_value()) {
+    QMessageBox::warning(this, "Edit Credential Set", "Credential set was not found.");
+    return;
+  }
+  const auto& credential = maybeCredential.value();
+
+  if (vaultManager_->state() == vaultrdp::core::VaultState::Locked && !ensureVaultUnlocked()) {
+    return;
+  }
+  const auto maybePassword = secretRepository_->decryptPasswordSecret(credential.secretId, vaultManager_);
+  const QString existingPassword = maybePassword.has_value() ? maybePassword.value() : QString();
+
+  NewCredentialDialog dialog(this);
+  dialog.setDialogTitle("Edit Credential Set");
+  dialog.setInitialValues(credential.name, credential.username, credential.domain.value_or(QString()),
+                          existingPassword, credential.allowAnyFolder);
+  if (dialog.exec() != QDialog::Accepted) {
+    return;
+  }
+
+  if (dialog.credentialName().isEmpty() || dialog.username().isEmpty() || dialog.password().isEmpty()) {
+    QMessageBox::warning(this, "Edit Credential Set", "Name, username, and password are required.");
+    return;
+  }
+
+  QSqlDatabase db = databaseManager_->database();
+  if (!db.transaction()) {
+    QMessageBox::critical(this, "Edit Credential Set", "Failed to start database transaction.");
+    return;
+  }
+
+  if (!secretRepository_->updatePasswordSecret(credential.secretId, dialog.password(), vaultManager_)) {
+    db.rollback();
+    QMessageBox::warning(this, "Edit Credential Set", "Failed to update password.");
+    return;
+  }
+
+  std::optional<QString> domain;
+  if (!dialog.domain().isEmpty()) {
+    domain = dialog.domain();
+  }
+  if (!credentialRepository_->updateCredential(credential.id, dialog.credentialName(), dialog.username(), domain,
+                                               credential.folderId, dialog.allowAnyFolder())) {
+    db.rollback();
+    QMessageBox::warning(this, "Edit Credential Set", "Failed to update credential set.");
+    return;
+  }
+
+  if (!db.commit()) {
+    db.rollback();
+    QMessageBox::warning(this, "Edit Credential Set", "Failed to commit transaction.");
+    return;
+  }
+
+  reloadFolderTree();
 }
 
 void MainWindow::editSelectedGateway() {
@@ -950,10 +1193,14 @@ void MainWindow::editSelectedGateway() {
   }
 
   NewGatewayDialog dialog(this);
+  const auto credentials = credentialRepository_->listCredentials();
+  const auto folders = repository_->listFolders();
+  dialog.setCredentialOptions(
+      credentialOptionsForFolder(credentials, maybeGateway->folderId, folders, maybeGateway->credentialId));
   dialog.setDialogTitle("Edit Gateway");
   dialog.setInitialValues(maybeGateway->name, maybeGateway->host, maybeGateway->port,
                           maybeGateway->credentialMode, existingUsername, existingDomain, existingPassword,
-                          maybeGateway->allowAnyFolder);
+                          maybeGateway->allowAnyFolder, maybeGateway->credentialId);
   if (dialog.exec() != QDialog::Accepted) {
     return;
   }
@@ -972,49 +1219,57 @@ void MainWindow::editSelectedGateway() {
   const auto newMode = dialog.credentialMode();
   std::optional<QString> newCredentialId = maybeGateway->credentialId;
   if (newMode == vaultrdp::model::GatewayCredentialMode::SeparateSaved) {
-    if (dialog.username().isEmpty() || dialog.password().isEmpty()) {
+    if (dialog.useSavedCredentialSet()) {
+      if (!dialog.selectedCredentialSetId().has_value()) {
+        db.rollback();
+        QMessageBox::warning(this, "Edit Gateway", "Select a saved credential set.");
+        return;
+      }
+      newCredentialId = dialog.selectedCredentialSetId();
+    } else if (dialog.username().isEmpty() || dialog.password().isEmpty()) {
       db.rollback();
       QMessageBox::warning(this, "Edit Gateway",
                            "Username and password are required for Saved Credentials mode.");
       return;
-    }
-    if (vaultManager_->state() == vaultrdp::core::VaultState::Locked && !ensureVaultUnlocked()) {
-      db.rollback();
-      return;
-    }
-    std::optional<QString> domain;
-    if (!dialog.domain().isEmpty()) {
-      domain = dialog.domain();
-    }
-    if (oldCredential.has_value()) {
-      if (!secretRepository_->updatePasswordSecret(oldCredential->secretId, dialog.password(), vaultManager_)) {
-        db.rollback();
-        QMessageBox::warning(this, "Edit Gateway", "Failed to update saved gateway password.");
-        return;
-      }
-      if (!credentialRepository_->updateCredential(oldCredential->id, dialog.gatewayName() + " Gateway Credential",
-                                                   dialog.username(), domain)) {
-        db.rollback();
-        QMessageBox::warning(this, "Edit Gateway", "Failed to update gateway credential.");
-        return;
-      }
-      newCredentialId = oldCredential->id;
     } else {
-      const auto maybeSecretId = secretRepository_->createPasswordSecret(dialog.password(), vaultManager_);
-      if (!maybeSecretId.has_value()) {
+      if (vaultManager_->state() == vaultrdp::core::VaultState::Locked && !ensureVaultUnlocked()) {
         db.rollback();
-        QMessageBox::warning(this, "Edit Gateway", "Failed to store gateway password.");
         return;
       }
-      const auto maybeCredential =
-          credentialRepository_->createCredential(dialog.gatewayName() + " Gateway Credential",
-                                                  dialog.username(), domain, maybeSecretId.value());
-      if (!maybeCredential.has_value()) {
-        db.rollback();
-        QMessageBox::warning(this, "Edit Gateway", "Failed to create gateway credential.");
-        return;
+      std::optional<QString> domain;
+      if (!dialog.domain().isEmpty()) {
+        domain = dialog.domain();
       }
-      newCredentialId = maybeCredential->id;
+      if (oldCredential.has_value()) {
+        if (!secretRepository_->updatePasswordSecret(oldCredential->secretId, dialog.password(), vaultManager_)) {
+          db.rollback();
+          QMessageBox::warning(this, "Edit Gateway", "Failed to update saved gateway password.");
+          return;
+        }
+        if (!credentialRepository_->updateCredential(oldCredential->id, dialog.gatewayName() + " Gateway Credential",
+                                                     dialog.username(), domain)) {
+          db.rollback();
+          QMessageBox::warning(this, "Edit Gateway", "Failed to update gateway credential.");
+          return;
+        }
+        newCredentialId = oldCredential->id;
+      } else {
+        const auto maybeSecretId = secretRepository_->createPasswordSecret(dialog.password(), vaultManager_);
+        if (!maybeSecretId.has_value()) {
+          db.rollback();
+          QMessageBox::warning(this, "Edit Gateway", "Failed to store gateway password.");
+          return;
+        }
+        const auto maybeCredential =
+            credentialRepository_->createCredential(dialog.gatewayName() + " Gateway Credential",
+                                                    dialog.username(), domain, maybeSecretId.value());
+        if (!maybeCredential.has_value()) {
+          db.rollback();
+          QMessageBox::warning(this, "Edit Gateway", "Failed to create gateway credential.");
+          return;
+        }
+        newCredentialId = maybeCredential->id;
+      }
     }
   } else {
     newCredentialId = std::nullopt;
@@ -1170,35 +1425,38 @@ void MainWindow::showVaultSettingsDialog() {
       return;
     }
 
-    bool ok = false;
-    const QString oldPass = QInputDialog::getText(&dialog, "", "Current password:",
-                                                  QLineEdit::Password, QString(), &ok);
-    if (!ok || oldPass.isEmpty()) {
+    while (true) {
+      bool ok = false;
+      const QString oldPass = QInputDialog::getText(&dialog, "", "Current password:", QLineEdit::Password,
+                                                    QString(), &ok);
+      if (!ok || oldPass.isEmpty()) {
+        return;
+      }
+      const QString newPass = QInputDialog::getText(&dialog, "", "New password:", QLineEdit::Password, QString(),
+                                                    &ok);
+      if (!ok || newPass.isEmpty()) {
+        return;
+      }
+      const QString confirm = QInputDialog::getText(&dialog, "", "Confirm new password:", QLineEdit::Password,
+                                                    QString(), &ok);
+      if (!ok || confirm.isEmpty()) {
+        return;
+      }
+      if (newPass != confirm) {
+        QMessageBox::warning(&dialog, "Change Password", "New passwords do not match.");
+        continue;
+      }
+      if (!vaultManager_->rotatePassphrase(oldPass, newPass)) {
+        QMessageBox::warning(&dialog, "Change Password",
+                             "Failed to change password. Check current password and policy requirements.");
+        return;
+      }
+      QMessageBox::information(&dialog, "Change Password", "Vault password changed.");
+      updateVaultStatus();
+      refreshStats();
+      updateButtons();
       return;
     }
-    const QString newPass = QInputDialog::getText(&dialog, "", "New password:",
-                                                  QLineEdit::Password, QString(), &ok);
-    if (!ok || newPass.isEmpty()) {
-      return;
-    }
-    const QString confirm = QInputDialog::getText(&dialog, "", "Confirm new password:",
-                                                  QLineEdit::Password, QString(), &ok);
-    if (!ok || confirm.isEmpty()) {
-      return;
-    }
-    if (newPass != confirm) {
-      QMessageBox::warning(&dialog, "Change Password", "New passwords do not match.");
-      return;
-    }
-    if (!vaultManager_->rotatePassphrase(oldPass, newPass)) {
-      QMessageBox::warning(&dialog, "Change Password",
-                           "Failed to change password. Check current password and policy requirements.");
-      return;
-    }
-    QMessageBox::information(&dialog, "Change Password", "Vault password changed.");
-    updateVaultStatus();
-    refreshStats();
-    updateButtons();
   });
 
   layout->addWidget(encryptionStatus);
@@ -1260,21 +1518,22 @@ bool MainWindow::ensureVaultUnlocked() {
     return true;
   }
 
-  bool ok = false;
-  const QString passphrase =
-      QInputDialog::getText(this, "", "Master passphrase:", QLineEdit::Password, QString(), &ok);
-  if (!ok || passphrase.isEmpty()) {
-    return false;
-  }
+  while (true) {
+    bool ok = false;
+    const QString passphrase =
+        QInputDialog::getText(this, "", "Master passphrase:", QLineEdit::Password, QString(), &ok);
+    if (!ok || passphrase.isEmpty()) {
+      return false;
+    }
 
-  if (!vaultManager_->unlock(passphrase)) {
+    if (vaultManager_->unlock(passphrase)) {
+      updateVaultStatus();
+      return true;
+    }
+
     QMessageBox::warning(this, "Unlock Vault", "Incorrect passphrase.");
     updateVaultStatus();
-    return false;
   }
-
-  updateVaultStatus();
-  return true;
 }
 
 void MainWindow::updateVaultStatus() {
@@ -1325,63 +1584,70 @@ void MainWindow::applyVaultUiState() {
 
 void MainWindow::maybeRunFirstStartupEncryptionWizard() {
   QSettings settings;
-  if (settings.value("vault/first_startup_encryption_wizard_seen", false).toBool()) {
+  const QFileInfo dbInfo(databaseManager_->databasePath());
+  const QString dbInstanceKey =
+      QString("vault/first_startup_encryption_wizard_seen/%1/%2")
+          .arg(dbInfo.absoluteFilePath(),
+               QString::number(dbInfo.lastModified().toSecsSinceEpoch()));
+  if (settings.value(dbInstanceKey, false).toBool()) {
     return;
   }
 
-  settings.setValue("vault/first_startup_encryption_wizard_seen", true);
+  settings.setValue(dbInstanceKey, true);
 
   if (vaultManager_->state() != vaultrdp::core::VaultState::Disabled) {
     return;
   }
 
   QTimer::singleShot(0, this, [this]() {
-    QMessageBox wizard(this);
-    wizard.setWindowTitle("Encryption Setup");
-    wizard.setIcon(QMessageBox::Information);
-    wizard.setText("Protect saved passwords with vault encryption.");
-    wizard.setInformativeText(
-        "Vault encryption uses a master password to encrypt secrets in the database.\n\n"
-        "If you skip this step, saved passwords will be stored unencrypted (not recommended).\n\n"
-        "You can change this later from Vault -> Vault Settings.");
-    QPushButton* enableButton = wizard.addButton("Enable Encryption (Recommended)", QMessageBox::AcceptRole);
-    QPushButton* skipButton = wizard.addButton("Skip for Now", QMessageBox::RejectRole);
-    wizard.setDefaultButton(enableButton);
-    wizard.exec();
+    while (true) {
+      QMessageBox wizard(this);
+      wizard.setWindowTitle("Encryption Setup");
+      wizard.setIcon(QMessageBox::Information);
+      wizard.setText("Protect saved passwords with vault encryption.");
+      wizard.setInformativeText(
+          "Vault encryption uses a master password to encrypt secrets in the database.\n\n"
+          "If you skip this step, saved passwords will be stored unencrypted (not recommended).\n\n"
+          "You can change this later from Vault -> Vault Settings.");
+      QPushButton* enableButton = wizard.addButton("Enable Encryption (Recommended)", QMessageBox::AcceptRole);
+      QPushButton* skipButton = wizard.addButton("Skip for Now", QMessageBox::RejectRole);
+      wizard.setDefaultButton(enableButton);
+      wizard.exec();
 
-    if (wizard.clickedButton() != enableButton) {
-      Q_UNUSED(skipButton);
+      if (wizard.clickedButton() != enableButton) {
+        Q_UNUSED(skipButton);
+        updateVaultStatus();
+        return;
+      }
+
+      bool ok = false;
+      const QString passphrase = QInputDialog::getText(this, "", "Set vault password:", QLineEdit::Password,
+                                                       QString(), &ok);
+      if (!ok || passphrase.isEmpty()) {
+        // Back to Enable/Skip prompt.
+        continue;
+      }
+
+      const QString confirm = QInputDialog::getText(this, "", "Confirm vault password:", QLineEdit::Password,
+                                                    QString(), &ok);
+      if (!ok || confirm.isEmpty()) {
+        // Back to Enable/Skip prompt.
+        continue;
+      }
+
+      if (passphrase != confirm) {
+        QMessageBox::warning(this, "Enable Encryption", "Passwords do not match.");
+        // Back to Enable/Skip prompt.
+        continue;
+      }
+
+      if (!vaultManager_->enable(passphrase)) {
+        QMessageBox::warning(this, "Enable Encryption",
+                             "Failed to enable encryption. Password must satisfy policy.");
+      }
       updateVaultStatus();
       return;
     }
-
-    bool ok = false;
-    const QString passphrase = QInputDialog::getText(
-        this, "", "Set vault password:",
-        QLineEdit::Password, QString(), &ok);
-    if (!ok || passphrase.isEmpty()) {
-      updateVaultStatus();
-      return;
-    }
-
-    const QString confirm = QInputDialog::getText(this, "", "Confirm vault password:",
-                                                  QLineEdit::Password, QString(), &ok);
-    if (!ok || confirm.isEmpty()) {
-      updateVaultStatus();
-      return;
-    }
-
-    if (passphrase != confirm) {
-      QMessageBox::warning(this, "Enable Encryption", "Passwords do not match.");
-      updateVaultStatus();
-      return;
-    }
-
-    if (!vaultManager_->enable(passphrase)) {
-      QMessageBox::warning(this, "Enable Encryption",
-                           "Failed to enable encryption. Password must satisfy policy.");
-    }
-    updateVaultStatus();
   });
 }
 
@@ -1395,498 +1661,6 @@ void MainWindow::maybePromptUnlockOnStartup() {
   });
 }
 
-std::optional<QString> MainWindow::selectedFolderId() const {
-  const QModelIndex index = folderTreeView_->currentIndex();
-  if (!index.isValid()) {
-    return std::nullopt;
-  }
-
-  const int itemType = index.data(kItemTypeRole).toInt();
-  if (itemType == kItemTypeFolder) {
-    const QString id = index.data(kItemIdRole).toString();
-    if (!id.isEmpty()) {
-      return id;
-    }
-  }
-
-  if (itemType == kItemTypeConnection) {
-    const QString folderId = index.data(kItemFolderIdRole).toString();
-    if (!folderId.isEmpty()) {
-      return folderId;
-    }
-  }
-
-  if (itemType == kItemTypeGateway) {
-    const QString folderId = index.data(kItemFolderIdRole).toString();
-    if (!folderId.isEmpty()) {
-      return folderId;
-    }
-  }
-
-  if (itemType == kItemTypeVaultRoot) {
-    return std::nullopt;
-  }
-
-  return std::nullopt;
-}
-
-std::optional<QString> MainWindow::selectedConnectionId() const {
-  const QModelIndex index = folderTreeView_->currentIndex();
-  if (!index.isValid()) {
-    return std::nullopt;
-  }
-
-  if (index.data(kItemTypeRole).toInt() != kItemTypeConnection) {
-    return std::nullopt;
-  }
-
-  const QString id = index.data(kItemIdRole).toString();
-  if (id.isEmpty()) {
-    return std::nullopt;
-  }
-  return id;
-}
-
-std::optional<QString> MainWindow::selectedGatewayId() const {
-  const QModelIndex index = folderTreeView_->currentIndex();
-  if (!index.isValid()) {
-    return std::nullopt;
-  }
-  if (index.data(kItemTypeRole).toInt() != kItemTypeGateway) {
-    return std::nullopt;
-  }
-  const QString id = index.data(kItemIdRole).toString();
-  if (id.isEmpty()) {
-    return std::nullopt;
-  }
-  return id;
-}
-
-void MainWindow::connectSelectedConnection() {
-  qInfo() << "[ui] connectSelectedConnection requested";
-  const auto selectedId = selectedConnectionId();
-  if (!selectedId.has_value()) {
-    return;
-  }
-
-  if (sessionTabsByConnection_.contains(selectedId.value())) {
-    QWidget* tab = sessionTabsByConnection_.value(selectedId.value());
-    const int existingIndex = sessionTabWidget_->indexOf(tab);
-    if (existingIndex >= 0) {
-      sessionTabWidget_->setCurrentIndex(existingIndex);
-      return;
-    }
-    sessionTabsByConnection_.remove(selectedId.value());
-  }
-
-  const auto maybeConnection = connectionRepository_->findConnectionById(selectedId.value());
-  if (!maybeConnection.has_value()) {
-    QMessageBox::warning(this, "Connect", "Connection was not found.");
-    return;
-  }
-
-  if (vaultManager_->state() == vaultrdp::core::VaultState::Locked && maybeConnection->credentialId.has_value()) {
-    if (!ensureVaultUnlocked()) {
-      return;
-    }
-  }
-
-  const auto maybeLaunchInfo = connectionRepository_->resolveLaunchInfo(selectedId.value(), vaultManager_);
-  if (!maybeLaunchInfo.has_value()) {
-    QMessageBox::warning(this, "Connect", "Failed to resolve connection launch settings.");
-    return;
-  }
-
-  auto launchInfo = maybeLaunchInfo.value();
-  if (launchInfo.connection.gatewayId.has_value() &&
-      (!launchInfo.gatewayHost.has_value() || launchInfo.gatewayHost->trimmed().isEmpty())) {
-    QMessageBox::warning(this, "Connect", "Gateway is configured but missing host/port details.");
-    return;
-  }
-  const SessionRuntimeOptions sessionOptions = parseSessionRuntimeOptions(launchInfo.connection.optionsJson);
-  if ((!launchInfo.username.has_value() || launchInfo.username->trimmed().isEmpty()) &&
-      !sessionOptions.lastSuccessfulUsername.isEmpty()) {
-    launchInfo.username = sessionOptions.lastSuccessfulUsername;
-  }
-
-  blockAutoReconnectByConnection_[selectedId.value()] = false;
-  autoReconnectArmedByConnection_[selectedId.value()] = false;
-  authFailurePromptCountByConnection_[selectedId.value()] = 0;
-  lastAuthPromptMsByConnection_[selectedId.value()] = 0;
-
-  const bool needsPrimaryCredentialPrompt = !launchInfo.password.has_value() || launchInfo.password->isEmpty();
-  const bool needsGatewayCredentialPrompt =
-      launchInfo.gatewayHost.has_value() &&
-      (launchInfo.gatewayPromptEachTime || !launchInfo.gatewayPassword.has_value() ||
-       launchInfo.gatewayPassword->isEmpty());
-  if (needsPrimaryCredentialPrompt || needsGatewayCredentialPrompt) {
-    std::optional<QString> enteredUsername;
-    std::optional<QString> enteredDomain;
-    std::optional<QString> enteredPassword;
-    std::optional<QString> suggestedUsername = launchInfo.username;
-    std::optional<QString> suggestedDomain = launchInfo.domain;
-    if ((!suggestedUsername.has_value() || suggestedUsername->trimmed().isEmpty()) &&
-        launchInfo.gatewayUsername.has_value() && !launchInfo.gatewayUsername->trimmed().isEmpty()) {
-      suggestedUsername = launchInfo.gatewayUsername;
-    }
-    if ((!suggestedDomain.has_value() || suggestedDomain->trimmed().isEmpty()) &&
-        launchInfo.gatewayDomain.has_value() && !launchInfo.gatewayDomain->trimmed().isEmpty()) {
-      suggestedDomain = launchInfo.gatewayDomain;
-    }
-    if (!promptForCredentials(suggestedUsername, suggestedDomain, &enteredUsername, &enteredDomain,
-                              &enteredPassword,
-                              needsGatewayCredentialPrompt && !needsPrimaryCredentialPrompt)) {
-      return;
-    }
-    if (needsPrimaryCredentialPrompt) {
-      launchInfo.username = enteredUsername;
-      launchInfo.domain = enteredDomain;
-      launchInfo.password = enteredPassword;
-    }
-    if (needsGatewayCredentialPrompt) {
-      launchInfo.gatewayUsername = enteredUsername;
-      launchInfo.gatewayDomain = enteredDomain;
-      launchInfo.gatewayPassword = enteredPassword;
-    }
-  }
-
-  addSessionTab(launchInfo);
-}
-
-void MainWindow::disconnectCurrentSession() {
-  qInfo() << "[ui] disconnectCurrentSession requested";
-  const int index = sessionTabWidget_->currentIndex();
-  if (index < 0) {
-    return;
-  }
-  handleTabCloseRequested(index);
-}
-
-void MainWindow::disconnectAllSessions() {
-  qInfo() << "[ui] disconnectAllSessions requested";
-  while (sessionTabWidget_->count() > 0) {
-    bool removedAny = false;
-    for (int i = sessionTabWidget_->count() - 1; i >= 0; --i) {
-      if (sessionTabWidget_->widget(i) == welcomeTab_) {
-        continue;
-      }
-      handleTabCloseRequested(i);
-      removedAny = true;
-    }
-    if (!removedAny) {
-      break;
-    }
-  }
-}
-
-void MainWindow::handleTabCloseRequested(int index) {
-  qInfo() << "[ui] handleTabCloseRequested index=" << index;
-  if (index < 0 || index >= sessionTabWidget_->count()) {
-    return;
-  }
-
-  QWidget* tab = sessionTabWidget_->widget(index);
-  if (tab == nullptr || tab == welcomeTab_) {
-    return;
-  }
-
-  const QString connectionId = tab->property("connection_id").toString();
-  if (!connectionId.isEmpty()) {
-    sessionGenerationByConnection_[connectionId] = ++sessionGenerationCounter_;
-    qInfo().noquote() << "[session conn=" + connectionId + "] close requested generation advanced to"
-                      << sessionGenerationByConnection_.value(connectionId);
-    if (sessionsByConnection_.contains(connectionId)) {
-      auto* session = sessionsByConnection_.take(connectionId);
-      delete session;
-    }
-  reconnectAttemptsByConnection_.remove(connectionId);
-  hasEverConnectedByConnection_.remove(connectionId);
-  sessionClipboardEnabledByConnection_.remove(connectionId);
-  launchInfoByConnection_.remove(connectionId);
-  authPromptActiveByConnection_.remove(connectionId);
-  blockAutoReconnectByConnection_.remove(connectionId);
-  autoReconnectArmedByConnection_.remove(connectionId);
-  authFailurePromptCountByConnection_.remove(connectionId);
-  lastAuthFailureWasGatewayByConnection_.remove(connectionId);
-  lastAuthPromptMsByConnection_.remove(connectionId);
-  sessionTabsByConnection_.remove(connectionId);
-}
-
-  sessionTabWidget_->removeTab(index);
-  tab->deleteLater();
-  ensureWelcomeTab();
-}
-
-void MainWindow::showTreeContextMenu(const QPoint& pos) {
-  const QModelIndex index = folderTreeView_->indexAt(pos);
-  if (index.isValid()) {
-    folderTreeView_->setCurrentIndex(index);
-  }
-
-  const int itemType = index.isValid() ? index.data(kItemTypeRole).toInt() : kItemTypeVaultRoot;
-  QMenu menu(this);
-
-  if (itemType == kItemTypeConnection) {
-    menu.addAction("Connect", this, &MainWindow::connectSelectedConnection);
-    menu.addAction("Edit...", this, &MainWindow::editSelectedConnection);
-    menu.addAction("Duplicate", this, &MainWindow::duplicateSelectedConnection);
-    menu.addAction("Rename", this, &MainWindow::renameSelectedItem);
-    menu.addAction("Delete", this, &MainWindow::deleteSelectedItem);
-    menu.addSeparator();
-    menu.addAction("Copy Hostname", this, &MainWindow::copySelectedHostname);
-    menu.addAction("Copy Username", this, &MainWindow::copySelectedUsername);
-  } else if (itemType == kItemTypeGateway) {
-    menu.addAction("Edit...", this, &MainWindow::editSelectedGateway);
-    menu.addAction("Duplicate", this, &MainWindow::duplicateSelectedGateway);
-    menu.addAction("Rename", this, &MainWindow::renameSelectedItem);
-    menu.addAction("Delete", this, &MainWindow::deleteSelectedItem);
-    menu.addSeparator();
-    menu.addAction("Copy Hostname", this, &MainWindow::copySelectedHostname);
-    menu.addAction("Copy Username", this, &MainWindow::copySelectedUsername);
-  } else {
-    menu.addAction("New Folder", this, &MainWindow::createFolder);
-    menu.addAction("New Connection...", this, &MainWindow::createConnection);
-    menu.addAction("New Gateway...", this, &MainWindow::createGateway);
-    if (itemType == kItemTypeFolder) {
-      menu.addSeparator();
-      menu.addAction("Rename", this, &MainWindow::renameSelectedItem);
-      menu.addAction("Delete", this, &MainWindow::deleteSelectedItem);
-      menu.addSeparator();
-      menu.addAction("Expand All", [this, index]() {
-        expandSubtree(index);
-      });
-      menu.addAction("Collapse All", [this, index]() {
-        collapseSubtree(index);
-      });
-    } else {
-      menu.addSeparator();
-      menu.addAction("Expand All", folderTreeView_, &QTreeView::expandAll);
-      menu.addAction("Collapse All", folderTreeView_, &QTreeView::collapseAll);
-    }
-  }
-
-  menu.exec(folderTreeView_->viewport()->mapToGlobal(pos));
-}
-
-void MainWindow::renameSelectedItem() {
-  const QModelIndex index = folderTreeView_->currentIndex();
-  if (!index.isValid()) {
-    return;
-  }
-
-  const int itemType = index.data(kItemTypeRole).toInt();
-  if (itemType != kItemTypeFolder && itemType != kItemTypeConnection && itemType != kItemTypeGateway) {
-    return;
-  }
-
-  folderTreeView_->edit(index);
-}
-
-void MainWindow::duplicateSelectedConnection() {
-  const auto connectionId = selectedConnectionId();
-  if (!connectionId.has_value()) {
-    return;
-  }
-
-  const auto duplicated = connectionRepository_->duplicateConnection(connectionId.value());
-  if (!duplicated.has_value()) {
-    QMessageBox::warning(this, "Duplicate Connection", "Failed to duplicate connection.");
-    return;
-  }
-  reloadFolderTree();
-}
-
-void MainWindow::duplicateSelectedGateway() {
-  const auto gatewayId = selectedGatewayId();
-  if (!gatewayId.has_value()) {
-    return;
-  }
-
-  const auto duplicated = gatewayRepository_->duplicateGateway(gatewayId.value());
-  if (!duplicated.has_value()) {
-    QMessageBox::warning(this, "Duplicate Gateway", "Failed to duplicate gateway.");
-    return;
-  }
-  reloadFolderTree();
-}
-
-void MainWindow::deleteSelectedItem() {
-  const QModelIndex index = folderTreeView_->currentIndex();
-  if (!index.isValid()) {
-    return;
-  }
-
-  const int itemType = index.data(kItemTypeRole).toInt();
-  const QString itemId = index.data(kItemIdRole).toString();
-
-  if (itemType == kItemTypeConnection) {
-    if (sessionTabsByConnection_.contains(itemId)) {
-      QMessageBox::information(this, "Delete Connection",
-                               "Disconnect the active session before deleting this connection.");
-      return;
-    }
-
-    if (QMessageBox::question(this, "Delete Connection", "Delete selected connection?") != QMessageBox::Yes) {
-      return;
-    }
-
-    if (!connectionRepository_->deleteConnection(itemId)) {
-      QMessageBox::warning(this, "Delete Connection", "Failed to delete connection.");
-      return;
-    }
-
-    reloadFolderTree();
-    return;
-  }
-
-  if (itemType == kItemTypeGateway) {
-    if (gatewayRepository_->isGatewayInUse(itemId)) {
-      QMessageBox::information(this, "Delete Gateway",
-                               "Gateway is used by one or more connections and cannot be deleted.");
-      return;
-    }
-
-    if (QMessageBox::question(this, "Delete Gateway", "Delete selected gateway?") != QMessageBox::Yes) {
-      return;
-    }
-    if (!gatewayRepository_->deleteGateway(itemId)) {
-      QMessageBox::warning(this, "Delete Gateway", "Failed to delete gateway.");
-      return;
-    }
-    reloadFolderTree();
-    return;
-  }
-
-  if (itemType == kItemTypeFolder) {
-    const auto allFolders = repository_->listFolders();
-    const auto allConnections = connectionRepository_->listConnections();
-
-    QSet<QString> subtree;
-    subtree.insert(itemId);
-    bool changed = true;
-    while (changed) {
-      changed = false;
-      for (const auto& folder : allFolders) {
-        if (folder.parentId.has_value() && subtree.contains(folder.parentId.value()) && !subtree.contains(folder.id)) {
-          subtree.insert(folder.id);
-          changed = true;
-        }
-      }
-    }
-
-    int connectionCount = 0;
-    for (const auto& conn : allConnections) {
-      if (subtree.contains(conn.folderId)) {
-        connectionCount++;
-      }
-    }
-
-    QString prompt = "Delete selected folder?";
-    if (subtree.size() > 1 || connectionCount > 0) {
-      prompt = QString("Delete folder recursively?\n\nSubfolders: %1\nConnections: %2")
-                   .arg(subtree.size() - 1)
-                   .arg(connectionCount);
-    }
-
-    if (QMessageBox::question(this, "Delete Folder", prompt) != QMessageBox::Yes) {
-      return;
-    }
-
-    if (!repository_->deleteFolderRecursive(itemId)) {
-      QMessageBox::warning(this, "Delete Folder", "Failed to delete folder.");
-      return;
-    }
-
-    reloadFolderTree();
-  }
-}
-
-void MainWindow::copySelectedHostname() {
-  if (const auto connectionId = selectedConnectionId(); connectionId.has_value()) {
-    const auto connection = connectionRepository_->findConnectionById(connectionId.value());
-    if (connection.has_value() && QGuiApplication::clipboard() != nullptr) {
-      QGuiApplication::clipboard()->setText(connection->host);
-    }
-    return;
-  }
-
-  if (const auto gatewayId = selectedGatewayId(); gatewayId.has_value()) {
-    const auto gateway = gatewayRepository_->findGatewayById(gatewayId.value());
-    if (gateway.has_value() && QGuiApplication::clipboard() != nullptr) {
-      QGuiApplication::clipboard()->setText(gateway->host);
-    }
-  }
-}
-
-void MainWindow::copySelectedUsername() {
-  std::optional<QString> username;
-  if (const auto connectionId = selectedConnectionId(); connectionId.has_value()) {
-    username = connectionRepository_->findUsernameByConnectionId(connectionId.value());
-  } else if (const auto gatewayId = selectedGatewayId(); gatewayId.has_value()) {
-    username = gatewayRepository_->findUsernameByGatewayId(gatewayId.value());
-  }
-
-  if (!username.has_value()) {
-    QMessageBox::information(this, "Copy Username", "No saved username for the selected item.");
-    return;
-  }
-
-  if (QGuiApplication::clipboard() != nullptr) {
-    QGuiApplication::clipboard()->setText(username.value());
-  }
-}
-
-void MainWindow::onTreeItemChanged(QStandardItem* item) {
-  if (item == nullptr || isReloadingTree_) {
-    return;
-  }
-
-  const int itemType = item->data(kItemTypeRole).toInt();
-  const QString itemId = item->data(kItemIdRole).toString();
-  const QString newName = item->text().trimmed();
-  if (newName.isEmpty()) {
-    reloadFolderTree();
-    return;
-  }
-
-  bool ok = false;
-  if (itemType == kItemTypeFolder) {
-    ok = repository_->renameFolder(itemId, newName);
-  } else if (itemType == kItemTypeConnection) {
-    ok = connectionRepository_->renameConnection(itemId, newName);
-  } else if (itemType == kItemTypeGateway) {
-    ok = gatewayRepository_->renameGateway(itemId, newName);
-  }
-
-  if (!ok) {
-    QMessageBox::warning(this, "Rename", "Failed to rename item.");
-    reloadFolderTree();
-  }
-}
-
-void MainWindow::expandSubtree(const QModelIndex& rootIndex) {
-  if (!rootIndex.isValid()) {
-    return;
-  }
-
-  folderTreeView_->setExpanded(rootIndex, true);
-  const int rowCount = folderTreeModel_->rowCount(rootIndex);
-  for (int row = 0; row < rowCount; ++row) {
-    expandSubtree(folderTreeModel_->index(row, 0, rootIndex));
-  }
-}
-
-void MainWindow::collapseSubtree(const QModelIndex& rootIndex) {
-  if (!rootIndex.isValid()) {
-    return;
-  }
-
-  const int rowCount = folderTreeModel_->rowCount(rootIndex);
-  for (int row = 0; row < rowCount; ++row) {
-    collapseSubtree(folderTreeModel_->index(row, 0, rootIndex));
-  }
-  folderTreeView_->setExpanded(rootIndex, false);
-}
 
 void MainWindow::addSessionTab(const vaultrdp::core::repository::ConnectionLaunchInfo& launchInfo) {
   const auto& connection = launchInfo.connection;
@@ -2348,48 +2122,19 @@ bool MainWindow::promptForCredentials(const std::optional<QString>& suggestedUse
     return false;
   }
 
-  QDialog dialog(this);
-  dialog.setWindowTitle("");
-  dialog.resize(420, 160);
-
-  auto* layout = new QVBoxLayout(&dialog);
-  auto* form = new QFormLayout();
-  auto* intro = new QLabel(forGateway ? "Enter gateway credentials." : "Enter connection credentials.", &dialog);
-  layout->addWidget(intro);
-  auto* usernameEdit = new QLineEdit(&dialog);
-  auto* domainEdit = new QLineEdit(&dialog);
-  auto* passwordEdit = new QLineEdit(&dialog);
-  passwordEdit->setEchoMode(QLineEdit::Password);
-  if (suggestedUsername.has_value()) {
-    usernameEdit->setText(suggestedUsername.value());
-  }
-  if (suggestedDomain.has_value()) {
-    domainEdit->setText(suggestedDomain.value());
-  }
-
-  form->addRow("Username", usernameEdit);
-  form->addRow("Domain", domainEdit);
-  form->addRow("Password", passwordEdit);
-  layout->addLayout(form);
-
-  auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-  layout->addWidget(buttons);
-  QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-  QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-
   while (true) {
-    if (dialog.exec() != QDialog::Accepted) {
+    vaultrdp::ui::CredentialPromptResult result;
+    if (!vaultrdp::ui::promptForCredentials(this, suggestedUsername, suggestedDomain, forGateway, &result)) {
       return false;
     }
-    const QString username = usernameEdit->text().trimmed();
-    const QString password = passwordEdit->text();
-    if (username.isEmpty() || password.isEmpty()) {
+    if (!result.username.has_value() || result.username->trimmed().isEmpty() ||
+        !result.password.has_value() || result.password->isEmpty()) {
       QMessageBox::warning(this, "Credentials Required", "Username and password are required.");
       continue;
     }
-    *usernameOut = username;
-    *domainOut = domainEdit->text().trimmed();
-    *passwordOut = password;
+    *usernameOut = result.username;
+    *domainOut = result.domain;
+    *passwordOut = result.password;
     return true;
   }
 }

@@ -26,6 +26,8 @@ qt_standard_project_setup()
 add_executable(vaultrdp
   src/main.cpp
   resources/resources.qrc
+  src/core/AppLogging.cpp
+  src/core/AppPaths.cpp
   src/core/DatabaseManager.cpp
   src/core/MigrationManager.cpp
   src/core/VaultManager.cpp
@@ -38,11 +40,20 @@ add_executable(vaultrdp
   src/core/repository/SecretRepository.cpp
   src/protocols/ISession.cpp
   src/protocols/RdpSession.cpp
+  src/protocols/RdpSessionUtils.cpp
   src/system/ScreenLockMonitor.cpp
+  src/ui/MainWindowInteraction.cpp
   src/ui/MainWindow.cpp
+  src/ui/CredentialScope.cpp
+  src/ui/RootScope.cpp
+  src/ui/NewCredentialDialog.cpp
+  src/ui/FolderTreeView.cpp
+  src/ui/GatewayScope.cpp
   src/ui/NewConnectionDialog.cpp
   src/ui/NewGatewayDialog.cpp
+  src/ui/CredentialPromptDialog.cpp
   src/ui/RdpRenderWidget.cpp
+  src/ui/SessionRuntimeOptions.cpp
   src/ui/SessionTabContent.cpp
 )
 
@@ -86,6 +97,8 @@ enable_testing()
 
 add_executable(vaultrdp_integration_tests
   tests/integration_tests.cpp
+  src/core/AppLogging.cpp
+  src/core/AppPaths.cpp
   src/core/DatabaseManager.cpp
   src/core/MigrationManager.cpp
   src/core/VaultManager.cpp
@@ -94,9 +107,15 @@ add_executable(vaultrdp_integration_tests
   src/core/repository/ConnectionRepository.cpp
   src/core/repository/CredentialRepository.cpp
   src/core/repository/GatewayRepository.cpp
+  src/core/repository/Repository.cpp
   src/core/repository/SecretRepository.cpp
   src/protocols/ISession.cpp
   src/protocols/RdpSession.cpp
+  src/protocols/RdpSessionUtils.cpp
+  src/ui/CredentialScope.cpp
+  src/ui/RootScope.cpp
+  src/ui/GatewayScope.cpp
+  src/ui/CredentialPromptDialog.cpp
 )
 
 target_include_directories(vaultrdp_integration_tests
