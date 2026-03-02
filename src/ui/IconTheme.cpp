@@ -36,12 +36,16 @@ QChar glyphForIcon(AppIcon icon) {
       return QChar(0xf084);  // fa-key
     case AppIcon::NewCredential:
       return QChar(0xf2bb);  // fa-address-card
+    case AppIcon::Menu:
+      return QChar(0xf0c9);  // fa-bars
     case AppIcon::Connect:
-      return QChar(0xf0a1);  // fa-bullhorn
+      return QChar(0xf04b);  // fa-play
     case AppIcon::Disconnect:
       return QChar(0xf127);  // fa-unlink
     case AppIcon::Lock:
       return QChar(0xf023);  // fa-lock
+    case AppIcon::Unlock:
+      return QChar(0xf3c1);  // fa-lock-open
     case AppIcon::Settings:
       return QChar(0xf013);  // fa-gear
     case AppIcon::Edit:
@@ -56,8 +60,9 @@ QChar glyphForIcon(AppIcon icon) {
   return QChar();
 }
 
-QIcon iconFromGlyph(QChar glyph, const QColor& color) {
-  QPixmap pixmap(24, 24);
+QIcon iconFromGlyph(QChar glyph, const QColor& color, int pixelSize = 24) {
+  const int iconPx = qMax(16, pixelSize);
+  QPixmap pixmap(iconPx, iconPx);
   pixmap.fill(Qt::transparent);
 
   QPainter painter(&pixmap);
@@ -65,7 +70,7 @@ QIcon iconFromGlyph(QChar glyph, const QColor& color) {
   painter.setPen(color);
 
   QFont font(g_fontFamily);
-  font.setPixelSize(17);
+  font.setPixelSize(qMax(12, static_cast<int>(iconPx * 0.72)));
   painter.setFont(font);
   painter.drawText(pixmap.rect(), Qt::AlignCenter, QString(glyph));
   painter.end();
@@ -96,8 +101,15 @@ QColor colorForIcon(AppIcon icon, const QWidget* widget) {
       return QColor(239, 185, 65);
     case AppIcon::NewCredential:
       return QColor(239, 185, 65);
+    case AppIcon::Menu: {
+      Q_UNUSED(widget);
+      const QColor bg = QApplication::palette().color(QPalette::Window);
+      return (bg.lightness() < 128) ? QColor(245, 248, 255) : QColor(58, 68, 84);
+    }
     case AppIcon::Lock:
-      return QColor(152, 160, 174);
+      return QColor(233, 187, 72);
+    case AppIcon::Unlock:
+      return QColor(233, 187, 72);
     case AppIcon::Delete:
       return QColor(220, 95, 95);
     default:
@@ -156,7 +168,23 @@ QIcon themedIcon(AppIcon icon, const QWidget* widget) {
     qWarning() << "[icons] unknown glyph mapping for icon";
     return QIcon();
   }
-  return iconFromGlyph(glyph, color);
+  return iconFromGlyph(glyph, color, 24);
+}
+
+QIcon themedIcon(AppIcon icon, int pixelSize, const QWidget* widget) {
+  const QColor color = colorForIcon(icon, widget);
+  if (!initializeIconTheme()) {
+    Q_UNUSED(icon);
+    Q_UNUSED(color);
+    return QIcon();
+  }
+
+  const QChar glyph = glyphForIcon(icon);
+  if (glyph.isNull()) {
+    qWarning() << "[icons] unknown glyph mapping for icon";
+    return QIcon();
+  }
+  return iconFromGlyph(glyph, color, pixelSize);
 }
 
 }  // namespace vaultrdp::ui

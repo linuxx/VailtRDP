@@ -73,6 +73,7 @@
 namespace {
 using vaultrdp::ui::kItemFolderIdRole;
 using vaultrdp::ui::kItemIdRole;
+using vaultrdp::ui::kItemOriginalNameRole;
 using vaultrdp::ui::kItemTypeConnection;
 using vaultrdp::ui::kItemTypeCredential;
 using vaultrdp::ui::kItemTypeFolder;
@@ -174,6 +175,11 @@ MainWindow::MainWindow(DatabaseManager* databaseManager, vaultrdp::core::VaultMa
       vaultStatusLabel_(nullptr),
       debugModeLabel_(nullptr),
       unlockVaultButton_(nullptr),
+      treeConnectButton_(nullptr),
+      treeNewConnectionButton_(nullptr),
+      treeNewFolderButton_(nullptr),
+      treeNewCredentialButton_(nullptr),
+      treeNewGatewayButton_(nullptr),
       mainToolBar_(nullptr),
       mainSplitter_(nullptr),
       welcomeTab_(nullptr),
@@ -182,7 +188,9 @@ MainWindow::MainWindow(DatabaseManager* databaseManager, vaultrdp::core::VaultMa
       ignoreClipboardEventsUntilMs_(0),
       lastClipboardWasRemoteFileUris_(false),
       isReloadingTree_(false),
-      isApplyingTreeFilter_(false) {
+      isApplyingTreeFilter_(false),
+      treeMutationGuard_(false),
+      treeReloadScheduled_(false) {
   setupUi();
   setupMenuBar();
   setupToolBar();
@@ -208,11 +216,73 @@ void MainWindow::setupUi() {
   layout->setContentsMargins(0, 0, 0, 0);
 
   mainSplitter_ = new QSplitter(Qt::Horizontal, centralWidget);
-  auto* dragTreeView = new vaultrdp::ui::FolderTreeView(mainSplitter_);
+  auto* treePane = new QWidget(mainSplitter_);
+  auto* treePaneLayout = new QVBoxLayout(treePane);
+  treePaneLayout->setContentsMargins(0, 0, 0, 0);
+  treePaneLayout->setSpacing(0);
+
+  auto* treeActionBar = new QWidget(treePane);
+  treeActionBar->setObjectName("treeActionBar");
+  auto* treeActionLayout = new QHBoxLayout(treeActionBar);
+  treeActionLayout->setContentsMargins(8, 6, 8, 6);
+  treeActionLayout->setSpacing(6);
+  treeActionLayout->addStretch();
+
+  treeConnectButton_ = new QToolButton(treeActionBar);
+  treeConnectButton_->setObjectName("treeActionButton");
+  treeConnectButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
+  treeConnectButton_->setToolTip("Connect selected connection");
+  treeConnectButton_->setFixedSize(36, 36);
+  treeConnectButton_->setIconSize(QSize(26, 26));
+  connect(treeConnectButton_, &QToolButton::clicked, this, &MainWindow::connectSelectedConnection);
+  treeActionLayout->addWidget(treeConnectButton_);
+
+  treeNewConnectionButton_ = new QToolButton(treeActionBar);
+  treeNewConnectionButton_->setObjectName("treeActionButton");
+  treeNewConnectionButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
+  treeNewConnectionButton_->setToolTip("New connection");
+  treeNewConnectionButton_->setFixedSize(36, 36);
+  treeNewConnectionButton_->setIconSize(QSize(26, 26));
+  connect(treeNewConnectionButton_, &QToolButton::clicked, this, &MainWindow::createConnection);
+  treeActionLayout->addWidget(treeNewConnectionButton_);
+
+  treeNewFolderButton_ = new QToolButton(treeActionBar);
+  treeNewFolderButton_->setObjectName("treeActionButton");
+  treeNewFolderButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
+  treeNewFolderButton_->setToolTip("New folder");
+  treeNewFolderButton_->setFixedSize(36, 36);
+  treeNewFolderButton_->setIconSize(QSize(26, 26));
+  connect(treeNewFolderButton_, &QToolButton::clicked, this, &MainWindow::createFolder);
+  treeActionLayout->addWidget(treeNewFolderButton_);
+
+  treeNewCredentialButton_ = new QToolButton(treeActionBar);
+  treeNewCredentialButton_->setObjectName("treeActionButton");
+  treeNewCredentialButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
+  treeNewCredentialButton_->setToolTip("New credential set");
+  treeNewCredentialButton_->setFixedSize(36, 36);
+  treeNewCredentialButton_->setIconSize(QSize(26, 26));
+  connect(treeNewCredentialButton_, &QToolButton::clicked, this, &MainWindow::createCredential);
+  treeActionLayout->addWidget(treeNewCredentialButton_);
+
+  treeNewGatewayButton_ = new QToolButton(treeActionBar);
+  treeNewGatewayButton_->setObjectName("treeActionButton");
+  treeNewGatewayButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
+  treeNewGatewayButton_->setToolTip("New gateway");
+  treeNewGatewayButton_->setFixedSize(36, 36);
+  treeNewGatewayButton_->setIconSize(QSize(26, 26));
+  connect(treeNewGatewayButton_, &QToolButton::clicked, this, &MainWindow::createGateway);
+  treeActionLayout->addWidget(treeNewGatewayButton_);
+
+  treeActionLayout->addStretch();
+  treePaneLayout->addWidget(treeActionBar);
+
+  auto* dragTreeView = new vaultrdp::ui::FolderTreeView(treePane);
   folderTreeView_ = dragTreeView;
   folderTreeView_->setHeaderHidden(true);
   folderTreeView_->header()->setStretchLastSection(true);
   folderTreeView_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+  folderTreeView_->setIndentation(18);
+  folderTreeView_->setUniformRowHeights(true);
   folderTreeView_->setEditTriggers(QAbstractItemView::EditKeyPressed);
   folderTreeView_->setContextMenuPolicy(Qt::CustomContextMenu);
   folderTreeView_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -222,6 +292,7 @@ void MainWindow::setupUi() {
   folderTreeView_->setDropIndicatorShown(true);
   folderTreeView_->setDragDropMode(QAbstractItemView::InternalMove);
   folderTreeView_->setDefaultDropAction(Qt::MoveAction);
+  treePaneLayout->addWidget(folderTreeView_);
   connect(folderTreeView_, &QTreeView::customContextMenuRequested, this, &MainWindow::showTreeContextMenu);
 
   folderTreeModel_ = new QStandardItemModel(folderTreeView_);
@@ -266,7 +337,7 @@ void MainWindow::setupUi() {
   dragTreeView->setDropCallback([this](const vaultrdp::ui::FolderTreeView::DragPayload& payload,
                                        const std::optional<QString>& destinationFolderId) {
     const auto scheduleReload = [this]() {
-      QTimer::singleShot(0, this, [this]() { reloadFolderTree(); });
+      scheduleTreeReload();
     };
     if (isReloadingTree_) {
       return;
@@ -308,59 +379,81 @@ void MainWindow::setupUi() {
     scheduleReload();
   });
 
-  sessionTabWidget_ = new QTabWidget(mainSplitter_);
+  auto* sessionPane = new QWidget(mainSplitter_);
+  auto* sessionPaneLayout = new QVBoxLayout(sessionPane);
+  sessionPaneLayout->setContentsMargins(0, 0, 0, 0);
+  sessionPaneLayout->setSpacing(0);
+
+  sessionTabWidget_ = new QTabWidget(sessionPane);
   sessionTabWidget_->setTabsClosable(true);
   sessionTabWidget_->setMovable(true);
   sessionTabWidget_->setDocumentMode(true);
+  sessionPaneLayout->addWidget(sessionTabWidget_);
 
   welcomeTab_ = new QWidget(sessionTabWidget_);
   auto* emptyLayout = new QVBoxLayout(welcomeTab_);
-  emptyLayout->setContentsMargins(40, 40, 40, 40);
-  emptyLayout->setSpacing(18);
+  emptyLayout->setContentsMargins(32, 36, 32, 36);
+  emptyLayout->setSpacing(16);
   emptyLayout->addStretch();
 
-  auto* titleLabel = new QLabel("No Active Sessions", welcomeTab_);
+  auto* centerBlock = new QWidget(welcomeTab_);
+  centerBlock->setObjectName("welcomeCenterBlock");
+  centerBlock->setMaximumWidth(980);
+  auto* centerLayout = new QVBoxLayout(centerBlock);
+  centerLayout->setContentsMargins(0, 0, 0, 0);
+  centerLayout->setSpacing(14);
+
+  auto* titleLabel = new QLabel("No Active Sessions", centerBlock);
   titleLabel->setObjectName("welcomeTitleLabel");
   titleLabel->setAlignment(Qt::AlignHCenter);
-  emptyLayout->addWidget(titleLabel);
+  centerLayout->addWidget(titleLabel);
 
-  auto* subtitleLabel = new QLabel("No active sessions. Select one of the options below to add a new item.", welcomeTab_);
+  auto* subtitleLabel =
+      new QLabel("No active sessions. Select one of the options below to add a new item.", centerBlock);
   subtitleLabel->setObjectName("welcomeSubtitleLabel");
   subtitleLabel->setAlignment(Qt::AlignHCenter);
   subtitleLabel->setWordWrap(true);
-  emptyLayout->addWidget(subtitleLabel);
+  centerLayout->addWidget(subtitleLabel);
 
   auto* cardsRow = new QHBoxLayout();
-  cardsRow->setSpacing(14);
-  cardsRow->setContentsMargins(0, 8, 0, 0);
+  cardsRow->setSpacing(16);
+  cardsRow->setContentsMargins(0, 6, 0, 0);
 
-  auto* newConnectionCard = new QPushButton("New Connection", welcomeTab_);
+  auto* newConnectionCard = new QToolButton(centerBlock);
   newConnectionCard->setObjectName("welcomeCardButton");
-  newConnectionCard->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewConnection, this));
-  newConnectionCard->setIconSize(QSize(32, 32));
-  newConnectionCard->setMinimumSize(220, 96);
-  connect(newConnectionCard, &QPushButton::clicked, this, &MainWindow::createConnection);
+  newConnectionCard->setText("New Connection");
+  newConnectionCard->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewConnection, 112, this));
+  newConnectionCard->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+  newConnectionCard->setIconSize(QSize(112, 112));
+  newConnectionCard->setFixedSize(280, 228);
+  connect(newConnectionCard, &QToolButton::clicked, this, &MainWindow::createConnection);
 
-  auto* newGatewayCard = new QPushButton("New Gateway", welcomeTab_);
+  auto* newGatewayCard = new QToolButton(centerBlock);
   newGatewayCard->setObjectName("welcomeCardButton");
-  newGatewayCard->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewGateway, this));
-  newGatewayCard->setIconSize(QSize(32, 32));
-  newGatewayCard->setMinimumSize(220, 96);
-  connect(newGatewayCard, &QPushButton::clicked, this, &MainWindow::createGateway);
+  newGatewayCard->setText("New Gateway");
+  newGatewayCard->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewGateway, 112, this));
+  newGatewayCard->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+  newGatewayCard->setIconSize(QSize(112, 112));
+  newGatewayCard->setFixedSize(280, 228);
+  connect(newGatewayCard, &QToolButton::clicked, this, &MainWindow::createGateway);
 
-  auto* newCredentialCard = new QPushButton("New Credential", welcomeTab_);
+  auto* newCredentialCard = new QToolButton(centerBlock);
   newCredentialCard->setObjectName("welcomeCardButton");
-  newCredentialCard->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewCredential, this));
-  newCredentialCard->setIconSize(QSize(32, 32));
-  newCredentialCard->setMinimumSize(220, 96);
-  connect(newCredentialCard, &QPushButton::clicked, this, &MainWindow::createCredential);
+  newCredentialCard->setText("New Credential");
+  newCredentialCard->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewCredential, 112, this));
+  newCredentialCard->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+  newCredentialCard->setIconSize(QSize(112, 112));
+  newCredentialCard->setFixedSize(280, 228);
+  connect(newCredentialCard, &QToolButton::clicked, this, &MainWindow::createCredential);
 
   cardsRow->addStretch();
   cardsRow->addWidget(newConnectionCard);
   cardsRow->addWidget(newGatewayCard);
   cardsRow->addWidget(newCredentialCard);
   cardsRow->addStretch();
-  emptyLayout->addLayout(cardsRow);
+  centerLayout->addLayout(cardsRow);
+
+  emptyLayout->addWidget(centerBlock, 0, Qt::AlignHCenter);
   emptyLayout->addStretch();
 
   sessionTabWidget_->addTab(welcomeTab_, "Welcome");
@@ -380,6 +473,18 @@ void MainWindow::setupUi() {
   if (QGuiApplication::clipboard() != nullptr) {
     connect(QGuiApplication::clipboard(), &QClipboard::dataChanged, this, [this]() {
       try {
+        if (QApplication::activeModalWidget() != nullptr) {
+          return;
+        }
+        if (treeMutationGuard_) {
+          return;
+        }
+        if (folderTreeView_ != nullptr) {
+          QWidget* fw = QApplication::focusWidget();
+          if (fw != nullptr && folderTreeView_->isAncestorOf(fw) && qobject_cast<QLineEdit*>(fw) != nullptr) {
+            return;
+          }
+        }
         if (suppressClipboardEvent_) {
           return;
         }
@@ -447,7 +552,7 @@ void MainWindow::setupUi() {
 
   mainSplitter_->setStretchFactor(0, 1);
   mainSplitter_->setStretchFactor(1, 3);
-  mainSplitter_->setSizes({320, 960});
+  mainSplitter_->setSizes({300, 980});
 
   layout->addWidget(mainSplitter_);
   setCentralWidget(centralWidget);
@@ -465,7 +570,7 @@ void MainWindow::setupUi() {
   connect(unlockVaultButton_, &QPushButton::clicked, [this]() {
     ensureVaultUnlocked();
   });
-  status->addPermanentWidget(unlockVaultButton_);
+  unlockVaultButton_->setVisible(false);
 
   status->showMessage("DB: Ready");
   setStatusBar(status);
@@ -602,22 +707,43 @@ void MainWindow::updateCreateActionAvailability() {
   const QModelIndex index = folderTreeView_ != nullptr ? folderTreeView_->currentIndex() : QModelIndex();
   const int itemType = index.isValid() ? index.data(kItemTypeRole).toInt() : kItemTypeVaultRoot;
   const bool atVaultLevel = !index.isValid() || itemType == kItemTypeVaultRoot;
+  const bool vaultUsable = vaultManager_ != nullptr &&
+                           vaultManager_->state() != vaultrdp::core::VaultState::Locked;
+  const bool canConnect = vaultUsable && itemType == kItemTypeConnection;
+  const bool canCreateUnderCurrent = vaultUsable && !atVaultLevel;
+  const bool canCreateFolder = vaultUsable;
 
   if (newFolderAction_ != nullptr) {
     newFolderAction_->setText(atVaultLevel ? "New Root Folder" : "New Subfolder");
-    newFolderAction_->setEnabled(true);
+    newFolderAction_->setEnabled(canCreateFolder);
   }
   if (newConnectionAction_ != nullptr) {
-    newConnectionAction_->setEnabled(!atVaultLevel);
+    newConnectionAction_->setEnabled(canCreateUnderCurrent);
   }
   if (newCredentialAction_ != nullptr) {
-    newCredentialAction_->setEnabled(!atVaultLevel);
+    newCredentialAction_->setEnabled(canCreateUnderCurrent);
   }
   if (newGatewayAction_ != nullptr) {
-    newGatewayAction_->setEnabled(!atVaultLevel);
+    newGatewayAction_->setEnabled(canCreateUnderCurrent);
   }
   if (connectAction_ != nullptr) {
-    connectAction_->setEnabled(itemType == kItemTypeConnection);
+    connectAction_->setEnabled(canConnect);
+  }
+  if (treeConnectButton_ != nullptr) {
+    treeConnectButton_->setEnabled(canConnect);
+  }
+  if (treeNewConnectionButton_ != nullptr) {
+    treeNewConnectionButton_->setEnabled(canCreateUnderCurrent);
+  }
+  if (treeNewFolderButton_ != nullptr) {
+    treeNewFolderButton_->setEnabled(canCreateFolder);
+    treeNewFolderButton_->setToolTip(atVaultLevel ? "New root folder" : "New subfolder");
+  }
+  if (treeNewCredentialButton_ != nullptr) {
+    treeNewCredentialButton_->setEnabled(canCreateUnderCurrent);
+  }
+  if (treeNewGatewayButton_ != nullptr) {
+    treeNewGatewayButton_->setEnabled(canCreateUnderCurrent);
   }
 }
 
@@ -824,7 +950,11 @@ void MainWindow::setupMenuBar() {
 
   auto* vaultMenu = menuBar()->addMenu("&Vault");
   lockVaultAction_ = vaultMenu->addAction("Lock Vault", [this]() {
-    vaultManager_->lock();
+    if (vaultManager_->state() == vaultrdp::core::VaultState::Locked) {
+      ensureVaultUnlocked();
+    } else {
+      vaultManager_->lock();
+    }
     updateVaultStatus();
   });
   lockVaultAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Lock, this));
@@ -841,8 +971,50 @@ void MainWindow::setupToolBar() {
   mainToolBar_->setObjectName("topToolBar");
   mainToolBar_->setIconSize(QSize(22, 22));
 
+  auto* appMenuButton = new QToolButton(mainToolBar_);
+  appMenuButton->setObjectName("topMenuButton");
+  appMenuButton->setToolTip("Menu");
+  appMenuButton->setPopupMode(QToolButton::InstantPopup);
+  appMenuButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+  appMenuButton->setIcon(themedIcon(vaultrdp::ui::AppIcon::Menu, this));
+  appMenuButton->setIconSize(QSize(30, 30));
+  appMenuButton->setFixedSize(46, 46);
+  auto* appMenu = new QMenu(appMenuButton);
+
+  auto addSubMenuFromMenuBar = [this, appMenu](const QString& title) {
+    if (menuBar() == nullptr) {
+      return;
+    }
+    for (QAction* action : menuBar()->actions()) {
+      if (action == nullptr || action->menu() == nullptr) {
+        continue;
+      }
+      const QString menuTitle = action->text();
+      if (menuTitle.compare(title, Qt::CaseInsensitive) != 0) {
+        continue;
+      }
+      auto* sub = appMenu->addMenu(menuTitle);
+      for (QAction* subAction : action->menu()->actions()) {
+        sub->addAction(subAction);
+      }
+      return;
+    }
+  };
+  addSubMenuFromMenuBar("&File");
+  addSubMenuFromMenuBar("&Edit");
+  addSubMenuFromMenuBar("&View");
+  addSubMenuFromMenuBar("&Settings");
+  addSubMenuFromMenuBar("&Session");
+  addSubMenuFromMenuBar("&Vault");
+  addSubMenuFromMenuBar("&Help");
+  appMenuButton->setMenu(appMenu);
+  mainToolBar_->addWidget(appMenuButton);
+  if (menuBar() != nullptr) {
+    menuBar()->setVisible(false);
+  }
+
   auto* brandIconLabel = new QLabel(mainToolBar_);
-  brandIconLabel->setPixmap(themedIcon(vaultrdp::ui::AppIcon::Brand, this).pixmap(22, 22));
+  brandIconLabel->setPixmap(themedIcon(vaultrdp::ui::AppIcon::Brand, 44, this).pixmap(44, 44));
   brandIconLabel->setObjectName("topBrandIconLabel");
   mainToolBar_->addWidget(brandIconLabel);
 
@@ -855,8 +1027,8 @@ void MainWindow::setupToolBar() {
   treeSearchEdit_ = new QLineEdit(mainToolBar_);
   treeSearchEdit_->setPlaceholderText("Search tree...");
   treeSearchEdit_->setClearButtonEnabled(true);
-  treeSearchEdit_->setMinimumWidth(360);
-  treeSearchEdit_->setMaximumWidth(600);
+  treeSearchEdit_->setMinimumWidth(420);
+  treeSearchEdit_->setMaximumWidth(760);
   treeSearchEdit_->setObjectName("topSearchEdit");
   mainToolBar_->addWidget(treeSearchEdit_);
   connect(treeSearchEdit_, &QLineEdit::textChanged, this, &MainWindow::applyTreeFilter);
@@ -872,10 +1044,28 @@ void MainWindow::setupToolBar() {
 
   if (auto* connectButton = qobject_cast<QToolButton*>(mainToolBar_->widgetForAction(connectAction_))) {
     connectButton->setObjectName("connectButton");
+    connectButton->setMinimumHeight(46);
+    connectButton->setIconSize(QSize(24, 24));
+    connectButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    connectButton->setToolTip("Connect");
   }
   if (auto* lockButton = qobject_cast<QToolButton*>(mainToolBar_->widgetForAction(lockVaultAction_))) {
     lockButton->setObjectName("lockButton");
+    lockButton->setMinimumHeight(46);
+    lockButton->setIconSize(QSize(24, 24));
+    lockButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
   }
+}
+
+void MainWindow::scheduleTreeReload() {
+  if (treeReloadScheduled_) {
+    return;
+  }
+  treeReloadScheduled_ = true;
+  QTimer::singleShot(0, this, [this]() {
+    treeReloadScheduled_ = false;
+    reloadFolderTree();
+  });
 }
 
 void MainWindow::reloadFolderTree() {
@@ -894,6 +1084,7 @@ void MainWindow::reloadFolderTree() {
   }
 
   isReloadingTree_ = true;
+  treeMutationGuard_ = true;
   QSignalBlocker modelBlocker(folderTreeModel_);
   folderTreeModel_->removeRows(0, folderTreeModel_->rowCount());
 
@@ -905,6 +1096,7 @@ void MainWindow::reloadFolderTree() {
   vaultRoot->setData(kItemTypeVaultRoot, kItemTypeRole);
   vaultRoot->setData(QString(), kItemIdRole);
   vaultRoot->setData(QString(), kItemFolderIdRole);
+  vaultRoot->setData(vaultRoot->text(), kItemOriginalNameRole);
   folderTreeModel_->appendRow(vaultRoot);
 
   const auto folders = repository_->listFolders();
@@ -922,6 +1114,7 @@ void MainWindow::reloadFolderTree() {
     folderItem->setData(kItemTypeFolder, kItemTypeRole);
     folderItem->setData(folder.id, kItemIdRole);
     folderItem->setData(folder.id, kItemFolderIdRole);
+    folderItem->setData(folder.name, kItemOriginalNameRole);
     folderItemById.insert(folder.id, folderItem);
   }
 
@@ -950,6 +1143,7 @@ void MainWindow::reloadFolderTree() {
     item->setData(kItemTypeConnection, kItemTypeRole);
     item->setData(connection.id, kItemIdRole);
     item->setData(connection.folderId, kItemFolderIdRole);
+    item->setData(connection.name, kItemOriginalNameRole);
 
     QStandardItem* folderParent = folderItemById.value(connection.folderId, nullptr);
     if (folderParent != nullptr) {
@@ -968,6 +1162,7 @@ void MainWindow::reloadFolderTree() {
     item->setData(kItemTypeCredential, kItemTypeRole);
     item->setData(credential.id, kItemIdRole);
     item->setData(credential.folderId.has_value() ? credential.folderId.value() : QString(), kItemFolderIdRole);
+    item->setData(credential.name, kItemOriginalNameRole);
     QStandardItem* folderParent =
         credential.folderId.has_value() ? folderItemById.value(credential.folderId.value(), nullptr) : nullptr;
     if (folderParent != nullptr) {
@@ -986,6 +1181,7 @@ void MainWindow::reloadFolderTree() {
     item->setData(kItemTypeGateway, kItemTypeRole);
     item->setData(gateway.id, kItemIdRole);
     item->setData(gateway.folderId.has_value() ? gateway.folderId.value() : QString(), kItemFolderIdRole);
+    item->setData(gateway.name, kItemOriginalNameRole);
     QStandardItem* folderParent =
         gateway.folderId.has_value() ? folderItemById.value(gateway.folderId.value(), nullptr) : nullptr;
     if (folderParent != nullptr) {
@@ -1005,8 +1201,15 @@ void MainWindow::reloadFolderTree() {
   if (treeSearchEdit_ != nullptr && !treeSearchEdit_->text().trimmed().isEmpty()) {
     applyTreeFilter(treeSearchEdit_->text());
   }
+  if (folderTreeView_->currentIndex().isValid() == false) {
+    const QModelIndex rootIndex = folderTreeModel_->index(0, 0);
+    if (rootIndex.isValid()) {
+      folderTreeView_->setCurrentIndex(rootIndex);
+    }
+  }
   updateCreateActionAvailability();
   isReloadingTree_ = false;
+  treeMutationGuard_ = false;
 }
 
 void MainWindow::applyTreeFilter(const QString& filterText) {
@@ -1098,28 +1301,29 @@ void MainWindow::applyTheme(ThemeMode mode) {
     return;
   }
 
+  ThemeMode effectiveMode = mode;
   if (mode == ThemeMode::System) {
     app->setPalette(QPalette());
-    app->setStyleSheet(QString());
-    return;
+    const QColor systemWindow = app->palette().color(QPalette::Window);
+    effectiveMode = (systemWindow.lightness() < 128) ? ThemeMode::Dark : ThemeMode::Light;
   }
 
   app->setStyle("Fusion");
   QPalette palette;
-  if (mode == ThemeMode::Dark) {
-    palette.setColor(QPalette::Window, QColor(32, 36, 44));
-    palette.setColor(QPalette::WindowText, QColor(225, 228, 235));
-    palette.setColor(QPalette::Base, QColor(26, 30, 36));
-    palette.setColor(QPalette::AlternateBase, QColor(36, 40, 48));
-    palette.setColor(QPalette::ToolTipBase, QColor(245, 245, 245));
-    palette.setColor(QPalette::ToolTipText, QColor(20, 20, 20));
-    palette.setColor(QPalette::Text, QColor(225, 228, 235));
-    palette.setColor(QPalette::Button, QColor(42, 47, 56));
-    palette.setColor(QPalette::ButtonText, QColor(225, 228, 235));
-    palette.setColor(QPalette::Highlight, QColor(70, 132, 255));
-    palette.setColor(QPalette::HighlightedText, QColor(255, 255, 255));
-    palette.setColor(QPalette::Disabled, QPalette::Text, QColor(130, 135, 145));
-    palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(130, 135, 145));
+  if (effectiveMode == ThemeMode::Dark) {
+      palette.setColor(QPalette::Window, QColor(32, 36, 44));
+      palette.setColor(QPalette::WindowText, QColor(225, 228, 235));
+      palette.setColor(QPalette::Base, QColor(26, 30, 36));
+      palette.setColor(QPalette::AlternateBase, QColor(36, 40, 48));
+      palette.setColor(QPalette::ToolTipBase, QColor(245, 245, 245));
+      palette.setColor(QPalette::ToolTipText, QColor(20, 20, 20));
+      palette.setColor(QPalette::Text, QColor(225, 228, 235));
+      palette.setColor(QPalette::Button, QColor(42, 47, 56));
+      palette.setColor(QPalette::ButtonText, QColor(225, 228, 235));
+      palette.setColor(QPalette::Highlight, QColor(70, 132, 255));
+      palette.setColor(QPalette::HighlightedText, QColor(255, 255, 255));
+      palette.setColor(QPalette::Disabled, QPalette::Text, QColor(130, 135, 145));
+      palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(130, 135, 145));
   } else {
     palette = QApplication::style()->standardPalette();
     palette.setColor(QPalette::Highlight, QColor(70, 132, 255));
@@ -1127,55 +1331,67 @@ void MainWindow::applyTheme(ThemeMode mode) {
   }
   app->setPalette(palette);
 
-  if (mode == ThemeMode::Dark) {
-    app->setStyleSheet(
+  if (effectiveMode == ThemeMode::Dark) {
+      app->setStyleSheet(
         "QMainWindow{background:#1d2129;}"
         "QMenuBar{background:#262b35;color:#dfe4ec;border-bottom:1px solid #313846;}"
         "QMenuBar::item:selected{background:#323a49;}"
         "QMenu{background:#252b35;color:#dfe4ec;border:1px solid #3a4252;}"
         "QMenu::item:selected{background:#3a4252;}"
-        "QToolBar#topToolBar{background:#262b35;border-bottom:1px solid #313846;spacing:10px;padding:6px;}"
+        "QToolBar#topToolBar{background:#262b35;border-bottom:1px solid #313846;spacing:10px;padding:8px 10px;}"
+        "QToolButton#topMenuButton{background:#313846;border:1px solid #465064;border-radius:8px;color:#e0e6f1;padding:0;}"
+        "QToolButton#topMenuButton:hover{background:#3b4455;}"
         "QLabel#topBrandLabel{font-size:18px;font-weight:700;color:#e6ebf2;padding-left:4px;padding-right:8px;}"
-        "QLineEdit#topSearchEdit{background:#1f2430;border:1px solid #3a4252;border-radius:8px;padding:8px 10px;color:#dfe4ec;}"
-        "QToolButton{background:#333b49;border:1px solid #435066;border-radius:8px;padding:8px 14px;color:#d9e0eb;}"
-        "QToolButton#connectButton{background:#2f4f88;border-color:#3e5f9a;color:#ecf2ff;}"
-        "QToolButton#lockButton{background:#3b414d;border-color:#4a5261;color:#d3dae5;}"
+        "QLineEdit#topSearchEdit{background:#1f2430;border:1px solid #3a4252;border-radius:8px;padding:9px 12px;color:#dfe4ec;min-height:20px;}"
+        "QWidget#treeActionBar{background:#232934;border-bottom:1px solid #313846;}"
+        "QToolButton#treeActionButton{background:#2f3643;border:1px solid #3f495a;border-radius:7px;padding:0;color:#d9e0eb;}"
+        "QToolButton#treeActionButton:disabled{background:#2a303b;border-color:#394250;color:#7e8897;}"
+        "QToolButton{background:#333b49;border:1px solid #435066;border-radius:8px;padding:9px 15px;color:#d9e0eb;}"
+        "QToolButton#connectButton{background:#2f4f88;border-color:#3e5f9a;color:#ecf2ff;padding:0;}"
+        "QToolButton#lockButton{background:#3b414d;border-color:#4a5261;color:#d3dae5;padding:0;}"
         "QToolButton:disabled{background:#2b313d;border-color:#394250;color:#7e8897;}"
-        "QTreeView{background:#1d222c;border-right:1px solid #2f3643;padding:4px;show-decoration-selected:1;}"
-        "QTreeView::item{padding:4px 6px;border-radius:6px;}"
+        "QTreeView{background:#1d222c;border-right:1px solid #2f3643;padding:6px 4px;show-decoration-selected:1;}"
+        "QTreeView::item{padding:5px 6px;border-radius:6px;min-height:22px;}"
         "QTreeView::item:selected{background:#2e5ea8;color:#f2f7ff;}"
         "QTabWidget::pane{border:0;}"
         "QTabBar::tab{background:#2a303b;color:#dbe2eb;padding:8px 12px;border-top-left-radius:8px;border-top-right-radius:8px;}"
         "QTabBar::tab:selected{background:#3a4352;color:#ffffff;}"
-        "QPushButton#welcomeCardButton{background:#242a35;border:1px solid #353d4d;border-radius:12px;color:#e0e6ef;font-size:15px;font-weight:600;text-align:left;padding:16px;}"
-        "QPushButton#welcomeCardButton:hover{background:#2a3240;border-color:#4268a8;}"
-        "QLabel#welcomeTitleLabel{font-size:42px;font-weight:700;color:#e3e8f0;}"
-        "QLabel#welcomeSubtitleLabel{font-size:22px;color:#aeb6c3;}"
+        "QPushButton#welcomeCardButton,QToolButton#welcomeCardButton{background:#242a35;border:1px solid #353d4d;border-radius:14px;color:#e0e6ef;font-size:16px;font-weight:650;text-align:center;padding:16px;}"
+        "QPushButton#welcomeCardButton:hover,QToolButton#welcomeCardButton:hover{background:#2a3240;border-color:#4268a8;}"
+        "QWidget#welcomeCenterBlock{background:transparent;}"
+        "QLabel#welcomeTitleLabel{font-size:48px;font-weight:700;color:#e3e8f0;}"
+        "QLabel#welcomeSubtitleLabel{font-size:24px;color:#aeb6c3;}"
         "QStatusBar{background:#1f2430;color:#aeb6c3;border-top:1px solid #303846;}");
   } else {
-    app->setStyleSheet(
+      app->setStyleSheet(
         "QMainWindow{background:#f3f4f7;}"
         "QMenuBar{background:#f0f2f6;color:#2c3440;border-bottom:1px solid #d9dde6;}"
         "QMenuBar::item:selected{background:#e3e7ef;}"
         "QMenu{background:#ffffff;color:#2f3742;border:1px solid #d5dae4;}"
         "QMenu::item:selected{background:#e8edf7;}"
-        "QToolBar#topToolBar{background:#f0f2f6;border-bottom:1px solid #d9dde6;spacing:10px;padding:6px;}"
+        "QToolBar#topToolBar{background:#f0f2f6;border-bottom:1px solid #d9dde6;spacing:10px;padding:8px 10px;}"
+        "QToolButton#topMenuButton{background:#e2e6ee;border:1px solid #c8cfdb;border-radius:8px;color:#4f5b6f;padding:0;}"
+        "QToolButton#topMenuButton:hover{background:#d8deea;}"
         "QLabel#topBrandLabel{font-size:18px;font-weight:700;color:#273240;padding-left:4px;padding-right:8px;}"
-        "QLineEdit#topSearchEdit{background:#ffffff;border:1px solid #cfd5e1;border-radius:8px;padding:8px 10px;color:#2f3742;}"
-        "QToolButton{background:#e8edf5;border:1px solid #d0d8e5;border-radius:8px;padding:8px 14px;color:#4f5b6f;}"
-        "QToolButton#connectButton{background:#3f7ee8;border-color:#4f8cee;color:#ffffff;}"
-        "QToolButton#lockButton{background:#e8edf5;border-color:#d0d8e5;color:#4f5b6f;}"
+        "QLineEdit#topSearchEdit{background:#ffffff;border:1px solid #cfd5e1;border-radius:8px;padding:9px 12px;color:#2f3742;min-height:20px;}"
+        "QWidget#treeActionBar{background:#f2f4f8;border-bottom:1px solid #d9dde6;}"
+        "QToolButton#treeActionButton{background:#e8edf5;border:1px solid #d0d8e5;border-radius:7px;padding:0;color:#4f5b6f;}"
+        "QToolButton#treeActionButton:disabled{background:#e6ebf3;border-color:#d0d7e4;color:#8f98a8;}"
+        "QToolButton{background:#e8edf5;border:1px solid #d0d8e5;border-radius:8px;padding:9px 15px;color:#4f5b6f;}"
+        "QToolButton#connectButton{background:#3f7ee8;border-color:#4f8cee;color:#ffffff;padding:0;}"
+        "QToolButton#lockButton{background:#e8edf5;border-color:#d0d8e5;color:#4f5b6f;padding:0;}"
         "QToolButton:disabled{background:#e6ebf3;border-color:#d0d7e4;color:#8f98a8;}"
-        "QTreeView{background:#f7f8fb;border-right:1px solid #d9dde6;padding:4px;show-decoration-selected:1;}"
-        "QTreeView::item{padding:4px 6px;border-radius:6px;}"
+        "QTreeView{background:#f7f8fb;border-right:1px solid #d9dde6;padding:6px 4px;show-decoration-selected:1;}"
+        "QTreeView::item{padding:5px 6px;border-radius:6px;min-height:22px;}"
         "QTreeView::item:selected{background:#dbe8ff;color:#233040;}"
         "QTabWidget::pane{border:0;}"
         "QTabBar::tab{background:#e8ecf4;color:#374255;padding:8px 12px;border-top-left-radius:8px;border-top-right-radius:8px;}"
         "QTabBar::tab:selected{background:#ffffff;color:#1f2b3a;}"
-        "QPushButton#welcomeCardButton{background:#ffffff;border:1px solid #d9dfe9;border-radius:12px;color:#2f3742;font-size:15px;font-weight:600;text-align:left;padding:16px;}"
-        "QPushButton#welcomeCardButton:hover{background:#f6f8fc;border-color:#91b4f2;}"
-        "QLabel#welcomeTitleLabel{font-size:42px;font-weight:700;color:#2b3440;}"
-        "QLabel#welcomeSubtitleLabel{font-size:22px;color:#677283;}"
+        "QPushButton#welcomeCardButton,QToolButton#welcomeCardButton{background:#ffffff;border:1px solid #d9dfe9;border-radius:14px;color:#2f3742;font-size:16px;font-weight:650;text-align:center;padding:16px;}"
+        "QPushButton#welcomeCardButton:hover,QToolButton#welcomeCardButton:hover{background:#f6f8fc;border-color:#91b4f2;}"
+        "QWidget#welcomeCenterBlock{background:transparent;}"
+        "QLabel#welcomeTitleLabel{font-size:48px;font-weight:700;color:#2b3440;}"
+        "QLabel#welcomeSubtitleLabel{font-size:24px;color:#677283;}"
         "QStatusBar{background:#f0f2f6;color:#5f6979;border-top:1px solid #d9dde6;}");
   }
 
@@ -1194,6 +1410,26 @@ void MainWindow::applyTheme(ThemeMode mode) {
   if (connectAction_ != nullptr) {
     connectAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Connect, this));
   }
+  if (treeConnectButton_ != nullptr) {
+    treeConnectButton_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Connect, this));
+    treeConnectButton_->setIconSize(QSize(26, 26));
+  }
+  if (treeNewConnectionButton_ != nullptr) {
+    treeNewConnectionButton_->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewConnection, this));
+    treeNewConnectionButton_->setIconSize(QSize(26, 26));
+  }
+  if (treeNewFolderButton_ != nullptr) {
+    treeNewFolderButton_->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewFolder, this));
+    treeNewFolderButton_->setIconSize(QSize(26, 26));
+  }
+  if (treeNewCredentialButton_ != nullptr) {
+    treeNewCredentialButton_->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewCredential, this));
+    treeNewCredentialButton_->setIconSize(QSize(26, 26));
+  }
+  if (treeNewGatewayButton_ != nullptr) {
+    treeNewGatewayButton_->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewGateway, this));
+    treeNewGatewayButton_->setIconSize(QSize(26, 26));
+  }
   if (disconnectAction_ != nullptr) {
     disconnectAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Disconnect, this));
   }
@@ -1201,10 +1437,31 @@ void MainWindow::applyTheme(ThemeMode mode) {
     disconnectAllAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Disconnect, this));
   }
   if (lockVaultAction_ != nullptr) {
-    lockVaultAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Lock, this));
+    const bool locked = vaultManager_ != nullptr && vaultManager_->state() == vaultrdp::core::VaultState::Locked;
+    lockVaultAction_->setIcon(
+        themedIcon(locked ? vaultrdp::ui::AppIcon::Unlock : vaultrdp::ui::AppIcon::Lock, this));
   }
   if (auto* brandIconLabel = findChild<QLabel*>("topBrandIconLabel")) {
-    brandIconLabel->setPixmap(themedIcon(vaultrdp::ui::AppIcon::Brand, this).pixmap(22, 22));
+    brandIconLabel->setPixmap(themedIcon(vaultrdp::ui::AppIcon::Brand, 44, this).pixmap(44, 44));
+  }
+  if (auto* topMenuButton = findChild<QToolButton*>("topMenuButton")) {
+    topMenuButton->setIcon(themedIcon(vaultrdp::ui::AppIcon::Menu, this));
+    topMenuButton->setIconSize(QSize(30, 30));
+    topMenuButton->setFixedSize(46, 46);
+  }
+  if (auto* connectButton = qobject_cast<QToolButton*>(mainToolBar_ != nullptr
+                                                             ? mainToolBar_->widgetForAction(connectAction_)
+                                                             : nullptr)) {
+    connectButton->setIconSize(QSize(24, 24));
+    connectButton->setMinimumHeight(46);
+    connectButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+  }
+  if (auto* lockButton = qobject_cast<QToolButton*>(mainToolBar_ != nullptr
+                                                         ? mainToolBar_->widgetForAction(lockVaultAction_)
+                                                         : nullptr)) {
+    lockButton->setIconSize(QSize(24, 24));
+    lockButton->setMinimumHeight(46);
+    lockButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
   }
   if (folderTreeModel_ != nullptr) {
     QSignalBlocker modelBlocker(folderTreeModel_);
@@ -2104,17 +2361,18 @@ void MainWindow::updateVaultStatus() {
 
   const bool encryptionEnabled = vaultManager_->isEnabled();
   const bool vaultUnlocked = vaultManager_->state() == vaultrdp::core::VaultState::Unlocked;
+  const bool vaultLocked = vaultManager_->state() == vaultrdp::core::VaultState::Locked;
   lockVaultAction_->setVisible(true);
-
-  if (!encryptionEnabled) {
-    lockVaultAction_->setEnabled(false);
-  } else {
-    lockVaultAction_->setEnabled(vaultUnlocked);
-  }
-  connectAction_->setEnabled(vaultManager_->state() == vaultrdp::core::VaultState::Unlocked);
-  disconnectAction_->setEnabled(vaultManager_->state() == vaultrdp::core::VaultState::Unlocked);
-  disconnectAllAction_->setEnabled(vaultManager_->state() == vaultrdp::core::VaultState::Unlocked);
+  lockVaultAction_->setText(vaultLocked ? "Unlock" : "Lock");
+  lockVaultAction_->setIcon(
+      themedIcon(vaultLocked ? vaultrdp::ui::AppIcon::Unlock : vaultrdp::ui::AppIcon::Lock, this));
+  lockVaultAction_->setEnabled(encryptionEnabled && (vaultUnlocked || vaultLocked));
+  const bool vaultUsable = vaultManager_->state() != vaultrdp::core::VaultState::Locked;
+  connectAction_->setEnabled(vaultUsable);
+  disconnectAction_->setEnabled(vaultUsable);
+  disconnectAllAction_->setEnabled(vaultUsable);
   applyVaultUiState();
+  updateCreateActionAvailability();
 }
 
 void MainWindow::applyVaultUiState() {
@@ -2127,11 +2385,26 @@ void MainWindow::applyVaultUiState() {
     menuBar()->setEnabled(!locked);
   }
   if (mainToolBar_ != nullptr) {
-    mainToolBar_->setEnabled(!locked);
+    for (QAction* action : mainToolBar_->actions()) {
+      if (action == nullptr) {
+        continue;
+      }
+      if (action == lockVaultAction_) {
+        action->setEnabled(true);
+      } else {
+        action->setEnabled(!locked);
+      }
+    }
+  }
+  if (treeSearchEdit_ != nullptr) {
+    treeSearchEdit_->setEnabled(!locked);
+  }
+  if (auto* topMenuButton = findChild<QToolButton*>("topMenuButton")) {
+    topMenuButton->setEnabled(!locked);
   }
   if (unlockVaultButton_ != nullptr) {
-    unlockVaultButton_->setVisible(locked);
-    unlockVaultButton_->setEnabled(locked);
+    unlockVaultButton_->setVisible(false);
+    unlockVaultButton_->setEnabled(false);
   }
 }
 
@@ -2250,21 +2523,45 @@ void MainWindow::addSessionTab(const vaultrdp::core::repository::ConnectionLaunc
   sessionsByConnection_.insert(connection.id, session);
 
   connect(sessionWidget, &vaultrdp::ui::SessionTabContent::keyInput, this,
-          [session](int qtKey, quint32 nativeScanCode, bool pressed) {
-            session->sendKeyInput(qtKey, nativeScanCode, pressed);
+          [this, connectionId = connection.id](int qtKey, quint32 nativeScanCode, bool pressed) {
+            auto* activeSession = sessionsByConnection_.value(connectionId, nullptr);
+            if (activeSession == nullptr) {
+              return;
+            }
+            activeSession->sendKeyInput(qtKey, nativeScanCode, pressed);
           });
   connect(sessionWidget, &vaultrdp::ui::SessionTabContent::mouseMoveInput, this,
-          [session](int x, int y) { session->sendMouseMove(x, y); });
+          [this, connectionId = connection.id](int x, int y) {
+            auto* activeSession = sessionsByConnection_.value(connectionId, nullptr);
+            if (activeSession == nullptr) {
+              return;
+            }
+            activeSession->sendMouseMove(x, y);
+          });
   connect(sessionWidget, &vaultrdp::ui::SessionTabContent::mouseButtonInput, this,
-          [session](Qt::MouseButton button, bool pressed, int x, int y) {
-            session->sendMouseButton(button, pressed, x, y);
+          [this, connectionId = connection.id](Qt::MouseButton button, bool pressed, int x, int y) {
+            auto* activeSession = sessionsByConnection_.value(connectionId, nullptr);
+            if (activeSession == nullptr) {
+              return;
+            }
+            activeSession->sendMouseButton(button, pressed, x, y);
           });
   connect(sessionWidget, &vaultrdp::ui::SessionTabContent::wheelInput, this,
-          [session](Qt::Orientation orientation, int delta, int x, int y) {
-            session->sendWheel(orientation, delta, x, y);
+          [this, connectionId = connection.id](Qt::Orientation orientation, int delta, int x, int y) {
+            auto* activeSession = sessionsByConnection_.value(connectionId, nullptr);
+            if (activeSession == nullptr) {
+              return;
+            }
+            activeSession->sendWheel(orientation, delta, x, y);
           });
   connect(sessionWidget, &vaultrdp::ui::SessionTabContent::viewportResizeRequested, this,
-          [session](int width, int height) { session->resizeSession(width, height); });
+          [this, connectionId = connection.id](int width, int height) {
+            auto* activeSession = sessionsByConnection_.value(connectionId, nullptr);
+            if (activeSession == nullptr) {
+              return;
+            }
+            activeSession->resizeSession(width, height);
+          });
 
   connect(sessionWidget, &vaultrdp::ui::SessionTabContent::reconnectRequested, this,
           [this, sessionGeneration](const QString& connectionId) {
@@ -2495,6 +2792,9 @@ void MainWindow::addSessionTab(const vaultrdp::core::repository::ConnectionLaunc
   connect(session, &vaultrdp::protocols::RdpSession::remoteClipboardText, this,
           [this, connectionId = connection.id](const QString& text) {
             try {
+              if (treeMutationGuard_ || QApplication::activeModalWidget() != nullptr) {
+                return;
+              }
               const auto currentId = currentSessionConnectionId();
               if (!currentId.has_value() || currentId.value() != connectionId ||
                   QGuiApplication::clipboard() == nullptr) {
@@ -2520,6 +2820,9 @@ void MainWindow::addSessionTab(const vaultrdp::core::repository::ConnectionLaunc
   connect(session, &vaultrdp::protocols::RdpSession::remoteClipboardFileUris, this,
           [this, connectionId = connection.id](const QString& uriList) {
             try {
+              if (treeMutationGuard_ || QApplication::activeModalWidget() != nullptr) {
+                return;
+              }
               const auto currentId = currentSessionConnectionId();
               if (!currentId.has_value() || currentId.value() != connectionId ||
                   QGuiApplication::clipboard() == nullptr) {

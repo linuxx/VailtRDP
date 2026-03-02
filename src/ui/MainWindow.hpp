@@ -22,6 +22,7 @@ class QLineEdit;
 class QPushButton;
 class QSplitter;
 class QToolBar;
+class QToolButton;
 class QWidget;
 
 namespace vaultrdp::core::repository {
@@ -75,6 +76,7 @@ class MainWindow : public QMainWindow {
   void setupUi();
   void setupMenuBar();
   void setupToolBar();
+  void scheduleTreeReload();
   void applyTreeFilter(const QString& filterText);
   bool applyTreeFilterRecursive(const QModelIndex& index, const QString& filterLower);
   void applyTheme(ThemeMode mode);
@@ -154,6 +156,11 @@ class MainWindow : public QMainWindow {
   QLabel* vaultStatusLabel_;
   QLabel* debugModeLabel_;
   QPushButton* unlockVaultButton_;
+  QToolButton* treeConnectButton_;
+  QToolButton* treeNewConnectionButton_;
+  QToolButton* treeNewFolderButton_;
+  QToolButton* treeNewCredentialButton_;
+  QToolButton* treeNewGatewayButton_;
   QToolBar* mainToolBar_;
   QSplitter* mainSplitter_;
   QWidget* welcomeTab_;
@@ -178,4 +185,6 @@ class MainWindow : public QMainWindow {
   bool lastClipboardWasRemoteFileUris_;
   bool isReloadingTree_;
   bool isApplyingTreeFilter_;
+  bool treeMutationGuard_;
+  bool treeReloadScheduled_;
 };

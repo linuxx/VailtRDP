@@ -8,6 +8,7 @@
 #include <QMessageBox>
 #include <QModelIndex>
 #include <QSet>
+#include <QSignalBlocker>
 #include <QSqlDatabase>
 #include <QStandardItem>
 #include <QTreeView>
@@ -27,6 +28,7 @@
 namespace {
 using vaultrdp::ui::kItemFolderIdRole;
 using vaultrdp::ui::kItemIdRole;
+using vaultrdp::ui::kItemOriginalNameRole;
 using vaultrdp::ui::kItemTypeConnection;
 using vaultrdp::ui::kItemTypeCredential;
 using vaultrdp::ui::kItemTypeFolder;
@@ -255,7 +257,10 @@ void MainWindow::handleTabCloseRequested(int index) {
                       << sessionGenerationByConnection_.value(connectionId);
     if (sessionsByConnection_.contains(connectionId)) {
       auto* session = sessionsByConnection_.take(connectionId);
-      delete session;
+      if (session != nullptr) {
+        session->disconnectSession();
+        session->deleteLater();
+      }
     }
     reconnectAttemptsByConnection_.remove(connectionId);
     hasEverConnectedByConnection_.remove(connectionId);
@@ -560,15 +565,27 @@ void MainWindow::copySelectedUsername() {
 }
 
 void MainWindow::onTreeItemChanged(QStandardItem* item) {
-  if (item == nullptr || isReloadingTree_) {
+  if (item == nullptr || isReloadingTree_ || treeMutationGuard_) {
     return;
   }
 
   const int itemType = item->data(kItemTypeRole).toInt();
   const QString itemId = item->data(kItemIdRole).toString();
+  if (itemId.trimmed().isEmpty()) {
+    return;
+  }
+  if (itemType != kItemTypeFolder && itemType != kItemTypeConnection &&
+      itemType != kItemTypeCredential && itemType != kItemTypeGateway) {
+    return;
+  }
+  const QString originalName = item->data(kItemOriginalNameRole).toString().trimmed();
   const QString newName = item->text().trimmed();
   if (newName.isEmpty()) {
-    reloadFolderTree();
+    QSignalBlocker blocker(folderTreeModel_);
+    item->setText(originalName);
+    return;
+  }
+  if (!originalName.isEmpty() && newName == originalName) {
     return;
   }
 
@@ -585,13 +602,16 @@ void MainWindow::onTreeItemChanged(QStandardItem* item) {
 
   if (!ok) {
     QMessageBox::warning(this, "Rename", "Failed to rename item.");
-    reloadFolderTree();
+    QSignalBlocker blocker(folderTreeModel_);
+    item->setText(originalName);
     return;
   }
-
+  item->setData(newName, kItemOriginalNameRole);
   if (itemType == kItemTypeFolder) {
-    // Defer rebuild to avoid mutating the model during itemChanged processing.
-    QTimer::singleShot(0, this, [this]() { reloadFolderTree(); });
+    QSignalBlocker blocker(folderTreeModel_);
+    if (auto* parent = item->parent(); parent != nullptr) {
+      parent->sortChildren(0, Qt::AscendingOrder);
+    }
   }
 }
 

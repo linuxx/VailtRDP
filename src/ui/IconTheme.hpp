@@ -17,9 +17,11 @@ enum class AppIcon {
   NewConnection,
   NewGateway,
   NewCredential,
+  Menu,
   Connect,
   Disconnect,
   Lock,
+  Unlock,
   Settings,
   Edit,
   Duplicate,
@@ -29,5 +31,6 @@ enum class AppIcon {
 
 bool initializeIconTheme();
 QIcon themedIcon(AppIcon icon, const QWidget* widget = nullptr);
+QIcon themedIcon(AppIcon icon, int pixelSize, const QWidget* widget = nullptr);
 
 }  // namespace vaultrdp::ui

@@ -7,6 +7,7 @@ namespace vaultrdp::ui {
 inline constexpr int kItemTypeRole = Qt::UserRole + 100;
 inline constexpr int kItemIdRole = Qt::UserRole + 101;
 inline constexpr int kItemFolderIdRole = Qt::UserRole + 102;
+inline constexpr int kItemOriginalNameRole = Qt::UserRole + 103;
 
 inline constexpr int kItemTypeFolder = 1;
 inline constexpr int kItemTypeConnection = 2;
