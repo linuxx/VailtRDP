@@ -16,7 +16,8 @@ SessionTabContent::SessionTabContent(QString connectionId, QWidget* parent)
       bannerLabel_(new QLabel(this)),
       reconnectButton_(new QPushButton("Reconnect", this)),
       renderHost_(new RdpRenderWidget(this)),
-      state_(vaultrdp::protocols::SessionState::Initialized) {
+      state_(vaultrdp::protocols::SessionState::Initialized),
+      transientStatusText_() {
   auto* layout = new QVBoxLayout(this);
 
   auto* bannerRow = new QHBoxLayout();
@@ -35,6 +36,10 @@ SessionTabContent::SessionTabContent(QString connectionId, QWidget* parent)
     Q_EMIT reconnectRequested(connectionId_);
   });
   connect(renderHost_, &RdpRenderWidget::keyInput, this, &SessionTabContent::keyInput);
+  connect(renderHost_, &RdpRenderWidget::windowsKeyReleaseRequested, this,
+          &SessionTabContent::windowsKeyReleaseRequested);
+  connect(renderHost_, &RdpRenderWidget::modifierResetRequested, this,
+          &SessionTabContent::modifierResetRequested);
   connect(renderHost_, &RdpRenderWidget::mouseMoveInput, this, &SessionTabContent::mouseMoveInput);
   connect(renderHost_, &RdpRenderWidget::mouseButtonInput, this, &SessionTabContent::mouseButtonInput);
   connect(renderHost_, &RdpRenderWidget::wheelInput, this, &SessionTabContent::wheelInput);
@@ -62,17 +67,20 @@ void SessionTabContent::setSessionState(vaultrdp::protocols::SessionState state)
       bannerLabel_->setText("");
       break;
     case vaultrdp::protocols::SessionState::Connecting:
-      bannerLabel_->setText("");
+      bannerLabel_->setText(transientStatusText_);
       break;
     case vaultrdp::protocols::SessionState::Connected:
+      transientStatusText_.clear();
       bannerLabel_->setText("");
       break;
     case vaultrdp::protocols::SessionState::Disconnected:
+      transientStatusText_.clear();
       if (bannerLabel_->text().isEmpty()) {
         bannerLabel_->setText("Session disconnected.");
       }
       break;
     case vaultrdp::protocols::SessionState::Error:
+      transientStatusText_.clear();
       if (bannerLabel_->text().isEmpty()) {
         bannerLabel_->setText("Connection error.");
       }
@@ -86,15 +94,27 @@ void SessionTabContent::setErrorText(const QString& message) {
   if (message.trimmed().isEmpty()) {
     return;
   }
+  transientStatusText_.clear();
   bannerLabel_->setText(message);
   updateBannerVisibility();
 }
 
+void SessionTabContent::setTransientStatusText(const QString& message) {
+  transientStatusText_ = message.trimmed();
+  if (state_ == vaultrdp::protocols::SessionState::Connecting) {
+    bannerLabel_->setText(transientStatusText_);
+  }
+  updateBannerVisibility();
+}
+
 void SessionTabContent::updateBannerVisibility() {
-  const bool showBanner =
-      state_ == vaultrdp::protocols::SessionState::Error || state_ == vaultrdp::protocols::SessionState::Disconnected;
+  const bool showStatus =
+      state_ == vaultrdp::protocols::SessionState::Connecting && !transientStatusText_.isEmpty();
+  const bool showBanner = showStatus || state_ == vaultrdp::protocols::SessionState::Error ||
+                          state_ == vaultrdp::protocols::SessionState::Disconnected;
   bannerLabel_->setVisible(showBanner);
-  reconnectButton_->setVisible(showBanner);
+  reconnectButton_->setVisible(state_ == vaultrdp::protocols::SessionState::Error ||
+                               state_ == vaultrdp::protocols::SessionState::Disconnected);
 }
 
 }  // namespace vaultrdp::ui

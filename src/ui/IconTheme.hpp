@@ -19,6 +19,7 @@ enum class AppIcon {
   NewCredential,
   Menu,
   Connect,
+  Logoff,
   Disconnect,
   Lock,
   Unlock,

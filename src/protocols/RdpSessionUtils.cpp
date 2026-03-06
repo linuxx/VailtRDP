@@ -160,18 +160,50 @@ bool isRemoteLogoffError(UINT32 code) {
 
 bool mapQtKeyToRdp(int qtKey, quint32 nativeScanCode, UINT8* code, UINT16* flags) {
   UINT16 scan = 0;
-  switch (nativeScanCode) {
-    case 28: scan = RDP_SCANCODE_RETURN; break;
-    case 96: scan = RDP_SCANCODE_RETURN_KP; break;
-    case 29: scan = RDP_SCANCODE_LCONTROL; break;
-    case 97: scan = RDP_SCANCODE_RCONTROL; break;
-    case 42: scan = RDP_SCANCODE_LSHIFT; break;
-    case 54: scan = RDP_SCANCODE_RSHIFT; break;
-    case 56: scan = RDP_SCANCODE_LMENU; break;
-    case 100: scan = RDP_SCANCODE_RMENU; break;
-    case 125: scan = RDP_SCANCODE_LWIN; break;
-    case 126: scan = RDP_SCANCODE_RWIN; break;
-    default: break;
+  // Wayland/native scan codes can collide with normal letter keys depending on backend/layout.
+  // Only trust native scan codes for keys where left/right distinction matters and key type matches.
+  switch (qtKey) {
+    case Qt::Key_Return:
+    case Qt::Key_Enter:
+      switch (nativeScanCode) {
+        case 28: scan = RDP_SCANCODE_RETURN; break;
+        case 96: scan = RDP_SCANCODE_RETURN_KP; break;
+        default: break;
+      }
+      break;
+    case Qt::Key_Control:
+      switch (nativeScanCode) {
+        case 29: scan = RDP_SCANCODE_LCONTROL; break;
+        case 97: scan = RDP_SCANCODE_RCONTROL; break;
+        default: break;
+      }
+      break;
+    case Qt::Key_Shift:
+      switch (nativeScanCode) {
+        case 42: scan = RDP_SCANCODE_LSHIFT; break;
+        case 54: scan = RDP_SCANCODE_RSHIFT; break;
+        default: break;
+      }
+      break;
+    case Qt::Key_Alt:
+    case Qt::Key_AltGr:
+      switch (nativeScanCode) {
+        case 56: scan = RDP_SCANCODE_LMENU; break;
+        case 100: scan = RDP_SCANCODE_RMENU; break;
+        default: break;
+      }
+      break;
+    case Qt::Key_Meta:
+    case Qt::Key_Super_L:
+    case Qt::Key_Super_R:
+      switch (nativeScanCode) {
+        case 125: scan = RDP_SCANCODE_LWIN; break;
+        case 126: scan = RDP_SCANCODE_RWIN; break;
+        default: break;
+      }
+      break;
+    default:
+      break;
   }
 
   if (scan != 0) {
@@ -253,4 +285,3 @@ UINT16 mouseFlagForButton(Qt::MouseButton button) {
 }
 
 }  // namespace vaultrdp::protocols::rdp
-

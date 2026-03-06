@@ -13,6 +13,9 @@
 #include <QStandardItem>
 #include <QTreeView>
 #include <QTimer>
+#include <QScreen>
+#include <QSplitter>
+#include <QWindow>
 
 #include "core/DatabaseManager.hpp"
 #include "core/VaultManager.hpp"
@@ -22,6 +25,9 @@
 #include "core/repository/Repository.hpp"
 #include "core/repository/SecretRepository.hpp"
 #include "protocols/RdpSession.hpp"
+#include "ui/IconTheme.hpp"
+#include "ui/SessionController.hpp"
+#include "ui/SessionTabContent.hpp"
 #include "ui/SessionRuntimeOptions.hpp"
 #include "ui/TreeItemRoles.hpp"
 
@@ -129,14 +135,14 @@ void MainWindow::connectSelectedConnection() {
     return;
   }
 
-  if (sessionTabsByConnection_.contains(selectedId.value())) {
+  if (hasActiveSessionForConnection(selectedId.value())) {
     QWidget* tab = sessionTabsByConnection_.value(selectedId.value());
     const int existingIndex = sessionTabWidget_->indexOf(tab);
     if (existingIndex >= 0) {
       sessionTabWidget_->setCurrentIndex(existingIndex);
-      return;
     }
-    sessionTabsByConnection_.remove(selectedId.value());
+    updateCreateActionAvailability();
+    return;
   }
 
   const auto maybeConnection = connectionRepository_->findConnectionById(selectedId.value());
@@ -169,10 +175,7 @@ void MainWindow::connectSelectedConnection() {
     launchInfo.username = sessionOptions.lastSuccessfulUsername;
   }
 
-  blockAutoReconnectByConnection_[selectedId.value()] = false;
-  autoReconnectArmedByConnection_[selectedId.value()] = false;
-  authFailurePromptCountByConnection_[selectedId.value()] = 0;
-  lastAuthPromptMsByConnection_[selectedId.value()] = 0;
+  resetSessionControllerStateForManualConnect(selectedId.value());
 
   const bool needsPrimaryCredentialPrompt = !launchInfo.password.has_value() || launchInfo.password->isEmpty();
   const bool needsGatewayCredentialPrompt =
@@ -211,6 +214,19 @@ void MainWindow::connectSelectedConnection() {
   }
 
   addSessionTab(launchInfo);
+  updateCreateActionAvailability();
+}
+
+void MainWindow::connectOrDisconnectSelectedConnection() {
+  const auto selectedId = selectedConnectionId();
+  if (!selectedId.has_value()) {
+    return;
+  }
+  if (hasActiveSessionForConnection(selectedId.value())) {
+    disconnectSelectedConnection();
+    return;
+  }
+  connectSelectedConnection();
 }
 
 void MainWindow::disconnectCurrentSession() {
@@ -220,6 +236,38 @@ void MainWindow::disconnectCurrentSession() {
     return;
   }
   handleTabCloseRequested(index);
+}
+
+void MainWindow::disconnectSelectedConnection() {
+  qInfo() << "[ui] disconnectSelectedConnection requested";
+  const auto selectedId = selectedConnectionId();
+  if (!selectedId.has_value()) {
+    return;
+  }
+  closeSessionForConnection(selectedId.value());
+}
+
+bool MainWindow::hasActiveSessionForConnection(const QString& connectionId) const {
+  QWidget* tab = sessionTabsByConnection_.value(connectionId, nullptr);
+  if (tab == nullptr || sessionTabWidget_ == nullptr) {
+    return false;
+  }
+  return sessionTabWidget_->indexOf(tab) >= 0;
+}
+
+bool MainWindow::closeSessionForConnection(const QString& connectionId) {
+  QWidget* tab = sessionTabsByConnection_.value(connectionId, nullptr);
+  if (tab == nullptr || sessionTabWidget_ == nullptr) {
+    sessionTabsByConnection_.remove(connectionId);
+    return false;
+  }
+  const int index = sessionTabWidget_->indexOf(tab);
+  if (index < 0) {
+    sessionTabsByConnection_.remove(connectionId);
+    return false;
+  }
+  handleTabCloseRequested(index);
+  return true;
 }
 
 void MainWindow::disconnectAllSessions() {
@@ -239,6 +287,146 @@ void MainWindow::disconnectAllSessions() {
   }
 }
 
+void MainWindow::logoffCurrentSession() {
+  qInfo() << "[ui] logoffCurrentSession requested";
+  const auto connectionId = currentSessionConnectionId();
+  if (!connectionId.has_value()) {
+    return;
+  }
+  auto* session = sessionsByConnection_.value(connectionId.value(), nullptr);
+  if (session == nullptr || session->state() != vaultrdp::protocols::SessionState::Connected) {
+    return;
+  }
+
+  auto releaseModifiers = [session]() {
+    session->sendKeyInput(Qt::Key_Meta, 0, false);
+    session->sendKeyInput(Qt::Key_Super_L, 0, false);
+    session->sendKeyInput(Qt::Key_Super_R, 0, false);
+    session->sendKeyInput(Qt::Key_Control, 0, false);
+    session->sendKeyInput(Qt::Key_Alt, 0, false);
+    session->sendKeyInput(Qt::Key_Shift, 0, false);
+  };
+  auto sendTap = [session](int qtKey) {
+    session->sendKeyInput(qtKey, 0, true);
+    session->sendKeyInput(qtKey, 0, false);
+  };
+  auto sendLetter = [session](QChar ch) {
+    const ushort uc = ch.toLower().unicode();
+    if (uc < 'a' || uc > 'z') {
+      return;
+    }
+    const int qtKey = Qt::Key_A + int(uc - 'a');
+    session->sendKeyInput(qtKey, 0, true);
+    session->sendKeyInput(qtKey, 0, false);
+  };
+
+  // Defensive reset first to avoid stuck modifier state across sessions/focus changes.
+  releaseModifiers();
+
+  // Win+R opens the Windows Run dialog, then we type "logoff" and press Enter.
+  session->sendKeyInput(Qt::Key_Meta, 0, true);
+  session->sendKeyInput(Qt::Key_R, 0, true);
+  session->sendKeyInput(Qt::Key_R, 0, false);
+  session->sendKeyInput(Qt::Key_Meta, 0, false);
+
+  QTimer::singleShot(120, this, [this, connectionId, sendLetter, sendTap, releaseModifiers]() {
+    auto* active = sessionsByConnection_.value(connectionId.value(), nullptr);
+    if (active == nullptr || active->state() != vaultrdp::protocols::SessionState::Connected) {
+      return;
+    }
+    const QString command = "logoff";
+    for (const QChar ch : command) {
+      sendLetter(ch);
+    }
+    sendTap(Qt::Key_Return);
+    releaseModifiers();
+  });
+}
+
+void MainWindow::openSelectedConnectionFullscreen() {
+  const auto selectedId = selectedConnectionId();
+  if (!selectedId.has_value()) {
+    return;
+  }
+  const QString connectionId = selectedId.value();
+  if (hasActiveSessionForConnection(connectionId)) {
+    enterSessionFullscreenForConnection(connectionId);
+    return;
+  }
+  pendingFullscreenByConnection_.insert(connectionId);
+  connectSelectedConnection();
+}
+
+void MainWindow::toggleCurrentSessionFullscreen() {
+  if (isSessionFullscreenActive()) {
+    exitSessionFullscreen();
+    return;
+  }
+  const auto currentId = currentSessionConnectionId();
+  if (!currentId.has_value()) {
+    openSelectedConnectionFullscreen();
+    return;
+  }
+  enterSessionFullscreenForConnection(currentId.value());
+}
+
+bool MainWindow::isSessionFullscreenActive() const {
+  return fullscreenMode_ == FullscreenMode::Entering || fullscreenMode_ == FullscreenMode::Active;
+}
+
+void MainWindow::enterSessionFullscreenForConnection(const QString& connectionId) {
+  if (!hasActiveSessionForConnection(connectionId)) {
+    return;
+  }
+  if (!isSessionFullscreenActive()) {
+    fullscreenMode_ = FullscreenMode::Entering;
+    splitterSizesBeforeSessionFullscreen_ = mainSplitter_ != nullptr ? mainSplitter_->sizes() : QList<int>{};
+    windowStateBeforeSessionFullscreen_ = windowState();
+  }
+  sessionFullscreenConnectionId_ = connectionId;
+  QWidget* tab = sessionTabsByConnection_.value(connectionId, nullptr);
+  if (tab != nullptr && sessionTabWidget_ != nullptr) {
+    const int index = sessionTabWidget_->indexOf(tab);
+    if (index >= 0) {
+      sessionTabWidget_->setCurrentIndex(index);
+    }
+  }
+  if (mainSplitter_ != nullptr) {
+    if (treePaneWidget_ != nullptr) {
+      treePaneWidget_->setMinimumWidth(0);
+      treePaneWidget_->setMaximumWidth(0);
+      treePaneWidget_->setVisible(false);
+    }
+    mainSplitter_->setSizes({0, 1});
+  }
+  showFullScreen();
+  fullscreenMode_ = FullscreenMode::Active;
+  updateCreateActionAvailability();
+}
+
+void MainWindow::exitSessionFullscreen() {
+  if (!isSessionFullscreenActive()) {
+    return;
+  }
+  fullscreenMode_ = FullscreenMode::Exiting;
+  sessionFullscreenConnectionId_.clear();
+  if ((windowStateBeforeSessionFullscreen_ & Qt::WindowMaximized) == Qt::WindowMaximized) {
+    showMaximized();
+  } else {
+    showNormal();
+  }
+  if (mainSplitter_ != nullptr && splitterSizesBeforeSessionFullscreen_.size() >= 2) {
+    if (treePaneWidget_ != nullptr) {
+      treePaneWidget_->setMaximumWidth(QWIDGETSIZE_MAX);
+      treePaneWidget_->setMinimumWidth(0);
+      treePaneWidget_->setVisible(true);
+    }
+    mainSplitter_->setSizes(splitterSizesBeforeSessionFullscreen_);
+  }
+  fullscreenMode_ = FullscreenMode::Windowed;
+  updateCreateActionAvailability();
+}
+
 void MainWindow::handleTabCloseRequested(int index) {
   qInfo() << "[ui] handleTabCloseRequested index=" << index;
   if (index < 0 || index >= sessionTabWidget_->count()) {
@@ -251,7 +439,11 @@ void MainWindow::handleTabCloseRequested(int index) {
   }
 
   const QString connectionId = tab->property("connection_id").toString();
+  const bool closingFullscreenSession =
+      isSessionFullscreenActive() && !sessionFullscreenConnectionId_.isEmpty() &&
+      sessionFullscreenConnectionId_ == connectionId;
   if (!connectionId.isEmpty()) {
+    pendingFullscreenByConnection_.remove(connectionId);
     sessionGenerationByConnection_[connectionId] = ++sessionGenerationCounter_;
     qInfo().noquote() << "[session conn=" + connectionId + "] close requested generation advanced to"
                       << sessionGenerationByConnection_.value(connectionId);
@@ -262,22 +454,30 @@ void MainWindow::handleTabCloseRequested(int index) {
         session->deleteLater();
       }
     }
-    reconnectAttemptsByConnection_.remove(connectionId);
-    hasEverConnectedByConnection_.remove(connectionId);
-    sessionClipboardEnabledByConnection_.remove(connectionId);
-    launchInfoByConnection_.remove(connectionId);
-    authPromptActiveByConnection_.remove(connectionId);
-    blockAutoReconnectByConnection_.remove(connectionId);
-    autoReconnectArmedByConnection_.remove(connectionId);
-    authFailurePromptCountByConnection_.remove(connectionId);
-    lastAuthFailureWasGatewayByConnection_.remove(connectionId);
-    lastAuthPromptMsByConnection_.remove(connectionId);
-    sessionTabsByConnection_.remove(connectionId);
+    clearSessionTrackingForConnection(connectionId);
   }
 
   sessionTabWidget_->removeTab(index);
   tab->deleteLater();
   ensureWelcomeTab();
+  if (closingFullscreenSession) {
+    exitSessionFullscreen();
+  } else if (isSessionFullscreenActive()) {
+    const auto currentId = currentSessionConnectionId();
+    if (currentId.has_value()) {
+      sessionFullscreenConnectionId_ = currentId.value();
+    } else {
+      exitSessionFullscreen();
+    }
+  }
+  updateCreateActionAvailability();
+}
+
+void MainWindow::clearSessionTrackingForConnection(const QString& connectionId) {
+  sessionController_->onSessionClosed(connectionId);
+  sessionClipboardEnabledByConnection_.remove(connectionId);
+  launchInfoByConnection_.remove(connectionId);
+  sessionTabsByConnection_.remove(connectionId);
 }
 
 void MainWindow::showTreeContextMenu(const QPoint& pos) {
@@ -290,7 +490,33 @@ void MainWindow::showTreeContextMenu(const QPoint& pos) {
   QMenu menu(this);
 
   if (itemType == kItemTypeConnection) {
-    menu.addAction("Connect", this, &MainWindow::connectSelectedConnection);
+    const QString connectionId = index.data(kItemIdRole).toString();
+    const bool active = hasActiveSessionForConnection(connectionId);
+    const bool vaultUsable = vaultManager_ != nullptr &&
+                             vaultManager_->state() != vaultrdp::core::VaultState::Locked;
+    auto* connectAction = menu.addAction("Connect", this, &MainWindow::connectSelectedConnection);
+    connectAction->setIcon(themedIcon(vaultrdp::ui::AppIcon::Connect, this));
+    connectAction->setEnabled(vaultUsable);
+    auto* disconnectAction = menu.addAction("Disconnect", this, &MainWindow::disconnectSelectedConnection);
+    disconnectAction->setIcon(themedIcon(vaultrdp::ui::AppIcon::Disconnect, this));
+    disconnectAction->setEnabled(active);
+    auto* logoffAction = menu.addAction("Logoff", this, [this, connectionId]() {
+      QWidget* tab = sessionTabsByConnection_.value(connectionId, nullptr);
+      if (tab != nullptr && sessionTabWidget_ != nullptr) {
+        const int index = sessionTabWidget_->indexOf(tab);
+        if (index >= 0) {
+          sessionTabWidget_->setCurrentIndex(index);
+        }
+      }
+      logoffCurrentSession();
+    });
+    logoffAction->setIcon(themedIcon(vaultrdp::ui::AppIcon::Logoff, this));
+    logoffAction->setEnabled(active);
+    auto* fullscreenAction =
+        menu.addAction("Open Full Screen", this, &MainWindow::openSelectedConnectionFullscreen);
+    fullscreenAction->setIcon(themedIcon(vaultrdp::ui::AppIcon::Connect, this));
+    fullscreenAction->setEnabled(active || vaultUsable);
+    menu.addSeparator();
     menu.addAction("Edit...", this, &MainWindow::editSelectedConnection);
     menu.addAction("Duplicate", this, &MainWindow::duplicateSelectedConnection);
     menu.addAction("Rename", this, &MainWindow::renameSelectedItem);

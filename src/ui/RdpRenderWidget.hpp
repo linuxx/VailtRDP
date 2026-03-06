@@ -14,6 +14,8 @@ class RdpRenderWidget : public QWidget {
 
  Q_SIGNALS:
   void keyInput(int qtKey, quint32 nativeScanCode, bool pressed);
+  void windowsKeyReleaseRequested();
+  void modifierResetRequested();
   void mouseMoveInput(int x, int y);
   void mouseButtonInput(Qt::MouseButton button, bool pressed, int x, int y);
   void wheelInput(Qt::Orientation orientation, int delta, int x, int y);
@@ -24,6 +26,8 @@ class RdpRenderWidget : public QWidget {
   void resizeEvent(QResizeEvent* event) override;
   void keyPressEvent(QKeyEvent* event) override;
   void keyReleaseEvent(QKeyEvent* event) override;
+  void focusInEvent(QFocusEvent* event) override;
+  void focusOutEvent(QFocusEvent* event) override;
   void mouseMoveEvent(QMouseEvent* event) override;
   void mousePressEvent(QMouseEvent* event) override;
   void mouseReleaseEvent(QMouseEvent* event) override;

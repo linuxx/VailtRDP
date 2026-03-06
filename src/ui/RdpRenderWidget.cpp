@@ -1,5 +1,7 @@
 #include "ui/RdpRenderWidget.hpp"
 
+#include <QFocusEvent>
+#include <QDebug>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
@@ -38,13 +40,39 @@ void RdpRenderWidget::resizeEvent(QResizeEvent* event) {
 }
 
 void RdpRenderWidget::keyPressEvent(QKeyEvent* event) {
+  const int key = event->key();
+  const bool isWindowsKey =
+      key == Qt::Key_Meta || key == Qt::Key_Super_L || key == Qt::Key_Super_R;
+  if (!isWindowsKey) {
+    // Force remote Windows keys up before normal typing to avoid latched Win state.
+    Q_EMIT windowsKeyReleaseRequested();
+  }
+  if (key == Qt::Key_T || key == Qt::Key_G || key == Qt::Key_B || key == Qt::Key_Y) {
+    qInfo().noquote() << "[kbd-ui] keyPress key=" << key << "text=" << event->text()
+                      << "nativeScan=" << event->nativeScanCode() << "mods=" << int(event->modifiers());
+  }
   Q_EMIT keyInput(event->key(), event->nativeScanCode(), true);
   event->accept();
 }
 
 void RdpRenderWidget::keyReleaseEvent(QKeyEvent* event) {
+  const int key = event->key();
+  if (key == Qt::Key_T || key == Qt::Key_G || key == Qt::Key_B || key == Qt::Key_Y) {
+    qInfo().noquote() << "[kbd-ui] keyRelease key=" << key << "text=" << event->text()
+                      << "nativeScan=" << event->nativeScanCode() << "mods=" << int(event->modifiers());
+  }
   Q_EMIT keyInput(event->key(), event->nativeScanCode(), false);
   event->accept();
+}
+
+void RdpRenderWidget::focusInEvent(QFocusEvent* event) {
+  QWidget::focusInEvent(event);
+  Q_EMIT modifierResetRequested();
+}
+
+void RdpRenderWidget::focusOutEvent(QFocusEvent* event) {
+  QWidget::focusOutEvent(event);
+  Q_EMIT modifierResetRequested();
 }
 
 void RdpRenderWidget::mouseMoveEvent(QMouseEvent* event) {

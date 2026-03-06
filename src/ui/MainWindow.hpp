@@ -17,6 +17,7 @@ class QTabWidget;
 class QTreeView;
 class QAction;
 class QCloseEvent;
+class QResizeEvent;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -24,6 +25,7 @@ class QSplitter;
 class QToolBar;
 class QToolButton;
 class QWidget;
+class QShortcut;
 
 namespace vaultrdp::core::repository {
 class ConnectionRepository;
@@ -46,6 +48,7 @@ enum class SessionState : int;
 }
 namespace vaultrdp::ui {
 class SessionTabContent;
+class SessionController;
 }
 
 class MainWindow : public QMainWindow {
@@ -59,12 +62,19 @@ class MainWindow : public QMainWindow {
 
  protected:
   void closeEvent(QCloseEvent* event) override;
+  void resizeEvent(QResizeEvent* event) override;
 
  private:
   enum class ThemeMode : int {
     System = 0,
     Dark = 1,
     Light = 2,
+  };
+  enum class FullscreenMode : int {
+    Windowed = 0,
+    Entering = 1,
+    Active = 2,
+    Exiting = 3,
   };
 
   void restoreUiSettings();
@@ -102,6 +112,7 @@ class MainWindow : public QMainWindow {
   std::optional<QString> selectedCredentialId() const;
   std::optional<QString> selectedGatewayId() const;
   void connectSelectedConnection();
+  void connectOrDisconnectSelectedConnection();
   bool promptForCredentials(const std::optional<QString>& suggestedUsername,
                             const std::optional<QString>& suggestedDomain,
                             std::optional<QString>* usernameOut, std::optional<QString>* domainOut,
@@ -109,7 +120,16 @@ class MainWindow : public QMainWindow {
   bool isAuthenticationFailureMessage(const QString& message) const;
   bool isGatewayAuthenticationFailureMessage(const QString& message) const;
   void disconnectCurrentSession();
+  void disconnectSelectedConnection();
   void disconnectAllSessions();
+  void logoffCurrentSession();
+  void openSelectedConnectionFullscreen();
+  void toggleCurrentSessionFullscreen();
+  void exitSessionFullscreen();
+  bool hasActiveSessionForConnection(const QString& connectionId) const;
+  bool closeSessionForConnection(const QString& connectionId);
+  QString formatSessionErrorForDisplay(const QString& message) const;
+  void enterSessionFullscreenForConnection(const QString& connectionId);
   void showTreeContextMenu(const QPoint& pos);
   void renameSelectedItem();
   void duplicateSelectedConnection();
@@ -128,6 +148,12 @@ class MainWindow : public QMainWindow {
   void ensureWelcomeTab();
   std::optional<QString> currentSessionConnectionId() const;
   void syncClipboardToFocusedSession();
+  void clearSessionTrackingForConnection(const QString& connectionId);
+  bool isSessionFullscreenActive() const;
+  bool isSessionGenerationCurrent(const QString& connectionId, quint64 generation,
+                                  const char* eventName) const;
+  void resetSessionControllerStateForManualConnect(const QString& connectionId);
+  void closeSessionTabForConnection(const QString& connectionId);
   bool validateMoveByScopeRules(int itemType, const QString& itemId, const std::optional<QString>& destinationFolderId,
                                 QString* messageOut) const;
 
@@ -147,8 +173,11 @@ class MainWindow : public QMainWindow {
   QAction* newGatewayAction_;
   QAction* newCredentialAction_;
   QAction* connectAction_;
+  QAction* logoffAction_;
+  QAction* exitFullscreenAction_;
   QAction* disconnectAction_;
   QAction* disconnectAllAction_;
+  QAction* fullscreenSessionAction_;
   QAction* lockVaultAction_;
   QAction* themeSystemAction_;
   QAction* themeDarkAction_;
@@ -163,19 +192,20 @@ class MainWindow : public QMainWindow {
   QToolButton* treeNewGatewayButton_;
   QToolBar* mainToolBar_;
   QSplitter* mainSplitter_;
+  QWidget* treePaneWidget_;
   QWidget* welcomeTab_;
+  QShortcut* fullscreenShortcut_;
+  QShortcut* exitFullscreenShortcut_;
+  FullscreenMode fullscreenMode_;
+  QString sessionFullscreenConnectionId_;
+  QList<int> splitterSizesBeforeSessionFullscreen_;
+  Qt::WindowStates windowStateBeforeSessionFullscreen_;
+  QSet<QString> pendingFullscreenByConnection_;
   QHash<QString, QWidget*> sessionTabsByConnection_;
   QHash<QString, vaultrdp::protocols::RdpSession*> sessionsByConnection_;
   QHash<QString, bool> sessionClipboardEnabledByConnection_;
   QHash<QString, vaultrdp::core::repository::ConnectionLaunchInfo> launchInfoByConnection_;
-  QHash<QString, bool> authPromptActiveByConnection_;
-  QHash<QString, bool> blockAutoReconnectByConnection_;
-  QHash<QString, bool> autoReconnectArmedByConnection_;
-  QHash<QString, int> authFailurePromptCountByConnection_;
-  QHash<QString, bool> lastAuthFailureWasGatewayByConnection_;
-  QHash<QString, qint64> lastAuthPromptMsByConnection_;
-  QHash<QString, int> reconnectAttemptsByConnection_;
-  QHash<QString, bool> hasEverConnectedByConnection_;
+  std::unique_ptr<vaultrdp::ui::SessionController> sessionController_;
   QHash<QString, quint64> sessionGenerationByConnection_;
   quint64 sessionGenerationCounter_;
   bool suppressClipboardEvent_;

@@ -101,7 +101,12 @@ class RdpSessionWorker : public QObject {
         pendingClipboardFormatList_(false),
         lastClipboardFormatListSentMs_(0),
         lastLocalClipboardTextAdvertised_(),
-        lastLocalClipboardUrisAdvertised_() {}
+        lastLocalClipboardUrisAdvertised_(),
+        connectedSinceMs_(0),
+        lastResizeApplyMs_(0),
+        pendingResize_(false),
+        pendingResizeWidth_(qMax(320, initialWidth)),
+        pendingResizeHeight_(qMax(240, initialHeight)) {}
 
   ~RdpSessionWorker() override {
     cleanup();
@@ -119,8 +124,9 @@ class RdpSessionWorker : public QObject {
 
   void enqueueResizeRequest(int width, int height) {
     QMutexLocker lock(&inputMutex_);
-    inputQueue_.push_back(
-        InputCommand{InputType::Resize, 0, 0, qMax(320, width), qMax(240, height), {}});
+    pendingResize_ = true;
+    pendingResizeWidth_ = qMax(320, width);
+    pendingResizeHeight_ = qMax(240, height);
   }
 
   void enqueueClipboardText(QString text) {
@@ -286,6 +292,8 @@ class RdpSessionWorker : public QObject {
     freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, static_cast<UINT32>(desiredWidth_));
     freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, static_cast<UINT32>(desiredHeight_));
     freerdp_settings_set_bool(settings, FreeRDP_UseMultimon, FALSE);
+    // Some servers reset the transport when receiving display layout updates (PDU type 0x37).
+    // Keep dynamic display updates disabled for stability.
     freerdp_settings_set_bool(settings, FreeRDP_DynamicResolutionUpdate, FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_SupportDisplayControl, FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_AsyncChannels, TRUE);
@@ -378,6 +386,8 @@ class RdpSessionWorker : public QObject {
     }
 
     connected_ = true;
+    connectedSinceMs_ = QDateTime::currentMSecsSinceEpoch();
+    lastResizeApplyMs_ = 0;
     Q_EMIT stateChanged(SessionState::Connected);
 
     while (!stopRequested_ && !freerdp_shall_disconnect_context(instance_->context)) {
@@ -451,7 +461,7 @@ class RdpSessionWorker : public QObject {
     QVector<InputCommand> batch;
     {
       QMutexLocker lock(&inputMutex_);
-      if (inputQueue_.isEmpty()) {
+      if (inputQueue_.isEmpty() && !pendingResize_) {
         return;
       }
       batch = std::move(inputQueue_);
@@ -470,27 +480,11 @@ class RdpSessionWorker : public QObject {
       } else if (cmd.type == InputType::Mouse) {
         freerdp_input_send_mouse_event(instance_->context->input, static_cast<UINT16>(cmd.flags),
                                        static_cast<UINT16>(cmd.x), static_cast<UINT16>(cmd.y));
-      } else if (cmd.type == InputType::Resize && connected_) {
-        if (!freerdp_settings_get_bool(instance_->context->settings, FreeRDP_DynamicResolutionUpdate) ||
-            !freerdp_settings_get_bool(instance_->context->settings, FreeRDP_SupportDisplayControl)) {
-          continue;
-        }
-
-        desiredWidth_ = qMax(200, cmd.x);
-        desiredHeight_ = qMax(200, cmd.y);
-
-        MONITOR_DEF monitor{};
-        monitor.left = 0;
-        monitor.top = 0;
-        monitor.right = desiredWidth_ - 1;
-        monitor.bottom = desiredHeight_ - 1;
-        monitor.flags = 1;
-
-        freerdp_settings_set_uint32(instance_->context->settings, FreeRDP_DesktopWidth,
-                                    static_cast<UINT32>(desiredWidth_));
-        freerdp_settings_set_uint32(instance_->context->settings, FreeRDP_DesktopHeight,
-                                    static_cast<UINT32>(desiredHeight_));
-        freerdp_display_send_monitor_layout(instance_->context, 1, &monitor);
+      } else if (cmd.type == InputType::Resize) {
+        QMutexLocker lock(&inputMutex_);
+        pendingResize_ = true;
+        pendingResizeWidth_ = qMax(320, cmd.x);
+        pendingResizeHeight_ = qMax(240, cmd.y);
       } else if (cmd.type == InputType::Clipboard && connected_) {
         latestClipboardText = cmd.text;
         clipboardTextChanged = true;
@@ -522,6 +516,53 @@ class RdpSessionWorker : public QObject {
 
     if (clipboardTextChanged || clipboardFilesChanged) {
       requestClipboardFormatListSend();
+    }
+
+    if (connected_ && instance_ != nullptr && instance_->context != nullptr && instance_->context->settings != nullptr) {
+      int targetWidth = 0;
+      int targetHeight = 0;
+      {
+        QMutexLocker lock(&inputMutex_);
+        if (pendingResize_) {
+          targetWidth = pendingResizeWidth_;
+          targetHeight = pendingResizeHeight_;
+        }
+      }
+
+      if (targetWidth >= 200 && targetHeight >= 200) {
+        const bool dynEnabled =
+            freerdp_settings_get_bool(instance_->context->settings, FreeRDP_DynamicResolutionUpdate);
+        const bool dispEnabled =
+            freerdp_settings_get_bool(instance_->context->settings, FreeRDP_SupportDisplayControl);
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        const bool warmupElapsed = (now - connectedSinceMs_) >= 2000;
+        const bool rateLimitElapsed = (now - lastResizeApplyMs_) >= 250;
+        if (dynEnabled && dispEnabled && warmupElapsed && rateLimitElapsed) {
+          desiredWidth_ = qMax(200, targetWidth);
+          desiredHeight_ = qMax(200, targetHeight);
+
+          MONITOR_DEF monitor{};
+          monitor.left = 0;
+          monitor.top = 0;
+          monitor.right = desiredWidth_ - 1;
+          monitor.bottom = desiredHeight_ - 1;
+          monitor.flags = 1;
+
+          freerdp_settings_set_uint32(instance_->context->settings, FreeRDP_DesktopWidth,
+                                      static_cast<UINT32>(desiredWidth_));
+          freerdp_settings_set_uint32(instance_->context->settings, FreeRDP_DesktopHeight,
+                                      static_cast<UINT32>(desiredHeight_));
+          const BOOL rc = freerdp_display_send_monitor_layout(instance_->context, 1, &monitor);
+          lastResizeApplyMs_ = now;
+          if (rc == TRUE) {
+            QMutexLocker lock(&inputMutex_);
+            pendingResize_ = false;
+          } else {
+            qWarning().noquote() << "[resize] monitor layout send failed for"
+                                 << desiredWidth_ << "x" << desiredHeight_;
+          }
+        }
+      }
     }
   }
 
@@ -1254,6 +1295,9 @@ class RdpSessionWorker : public QObject {
     disconnectIssued_ = false;
     remoteFileTransferActive_ = false;
     pendingClipboardFormatList_ = false;
+    pendingResize_ = false;
+    connectedSinceMs_ = 0;
+    lastResizeApplyMs_ = 0;
   }
 
   QString host_;
@@ -1295,6 +1339,11 @@ class RdpSessionWorker : public QObject {
   qint64 lastClipboardFormatListSentMs_;
   QString lastLocalClipboardTextAdvertised_;
   QString lastLocalClipboardUrisAdvertised_;
+  qint64 connectedSinceMs_;
+  qint64 lastResizeApplyMs_;
+  bool pendingResize_;
+  int pendingResizeWidth_;
+  int pendingResizeHeight_;
   QString localClipboardText_;
   QString localClipboardFileUris_;
   QMutex certificateStoreMutex_;
@@ -1397,11 +1446,21 @@ void RdpSession::sendKeyInput(int qtKey, quint32 nativeScanCode, bool pressed) {
   UINT8 code = 0;
   UINT16 flags = 0;
   if (!rdp::mapQtKeyToRdp(qtKey, nativeScanCode, &code, &flags)) {
+    if (qtKey == Qt::Key_T || qtKey == Qt::Key_G || qtKey == Qt::Key_B || qtKey == Qt::Key_Y) {
+      qWarning().noquote() << "[kbd-rdp] map failed key=" << qtKey << "nativeScan=" << nativeScanCode
+                           << "pressed=" << pressed;
+    }
     return;
   }
 
   if (!pressed) {
     flags |= KBD_FLAGS_RELEASE;
+  }
+
+  if (qtKey == Qt::Key_T || qtKey == Qt::Key_G || qtKey == Qt::Key_B || qtKey == Qt::Key_Y ||
+      qtKey == Qt::Key_Meta || qtKey == Qt::Key_Super_L || qtKey == Qt::Key_Super_R) {
+    qInfo().noquote() << "[kbd-rdp] send key=" << qtKey << "scanCode=" << code << "flags=0x"
+                      << QString::number(flags, 16) << "pressed=" << pressed;
   }
 
   worker_->enqueueKeyboardEvent(int(flags), int(code));

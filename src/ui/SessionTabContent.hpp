@@ -23,10 +23,13 @@ class SessionTabContent : public QWidget {
   QSize viewportSize() const;
   void setSessionState(vaultrdp::protocols::SessionState state);
   void setErrorText(const QString& message);
+  void setTransientStatusText(const QString& message);
 
  Q_SIGNALS:
   void reconnectRequested(const QString& connectionId);
   void keyInput(int qtKey, quint32 nativeScanCode, bool pressed);
+  void windowsKeyReleaseRequested();
+  void modifierResetRequested();
   void mouseMoveInput(int x, int y);
   void mouseButtonInput(Qt::MouseButton button, bool pressed, int x, int y);
   void wheelInput(Qt::Orientation orientation, int delta, int x, int y);
@@ -40,6 +43,7 @@ class SessionTabContent : public QWidget {
   QPushButton* reconnectButton_;
   RdpRenderWidget* renderHost_;
   vaultrdp::protocols::SessionState state_;
+  QString transientStatusText_;
 };
 
 }  // namespace vaultrdp::ui

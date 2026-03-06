@@ -40,6 +40,8 @@ QChar glyphForIcon(AppIcon icon) {
       return QChar(0xf0c9);  // fa-bars
     case AppIcon::Connect:
       return QChar(0xf04b);  // fa-play
+    case AppIcon::Logoff:
+      return QChar(0xf2f5);  // fa-right-from-bracket / sign-out-alt
     case AppIcon::Disconnect:
       return QChar(0xf127);  // fa-unlink
     case AppIcon::Lock:
@@ -94,6 +96,8 @@ QColor colorForIcon(AppIcon icon, const QWidget* widget) {
     case AppIcon::NewConnection:
     case AppIcon::Connect:
       return QColor(66, 141, 255);
+    case AppIcon::Logoff:
+      return QColor(224, 120, 64);
     case AppIcon::Gateway:
     case AppIcon::NewGateway:
       return QColor(83, 205, 143);
