@@ -5,6 +5,7 @@
 #include <QDebug>
 #include <QSqlDatabase>
 #include <QSqlQuery>
+#include <QStringList>
 #include <QUuid>
 
 #include <optional>
@@ -53,6 +54,103 @@ bool waitForState(vaultrdp::protocols::RdpSession* session, vaultrdp::protocols:
   timeout.start(timeoutMs);
   loop.exec();
   return session->state() == expected;
+}
+
+bool tableHasColumn(QSqlDatabase& db, const QString& tableName, const QString& columnName) {
+  QSqlQuery query(db);
+  if (!query.exec(QString("PRAGMA table_info(%1)").arg(tableName))) {
+    return false;
+  }
+  while (query.next()) {
+    if (query.value(1).toString() == columnName) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool createLegacyVersion1Database(const QString& dbPath) {
+  const QString connectionName = QUuid::createUuid().toString(QUuid::WithoutBraces);
+  bool ok = true;
+  {
+    QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", connectionName);
+    db.setDatabaseName(dbPath);
+    if (!db.open()) {
+      ok = false;
+    } else {
+      const QStringList statements = {
+          "CREATE TABLE folders (id TEXT PRIMARY KEY, parent_id TEXT NULL, name TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0)",
+          "CREATE TABLE connections (id TEXT PRIMARY KEY, folder_id TEXT, name TEXT NOT NULL, protocol INTEGER NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL, gateway_id TEXT NULL, credential_id TEXT NULL, resolution TEXT, color_depth INTEGER, options_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_connected_at INTEGER, FOREIGN KEY(folder_id) REFERENCES folders(id), FOREIGN KEY(gateway_id) REFERENCES gateways(id), FOREIGN KEY(credential_id) REFERENCES credentials(id))",
+          "CREATE TABLE gateways (id TEXT PRIMARY KEY, name TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL, credential_mode INTEGER NOT NULL, credential_id TEXT NULL, created_at INTEGER NOT NULL, FOREIGN KEY(credential_id) REFERENCES credentials(id))",
+          "CREATE TABLE credentials (id TEXT PRIMARY KEY, name TEXT NOT NULL, username TEXT NOT NULL, domain TEXT NULL, secret_id TEXT NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY(secret_id) REFERENCES secrets(id))",
+          "CREATE TABLE secrets (id TEXT PRIMARY KEY, type INTEGER NOT NULL, enc_blob BLOB NOT NULL, kdf_profile INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
+          "CREATE TABLE crypto_meta (id INTEGER PRIMARY KEY CHECK (id = 1), kdf_salt BLOB, kdf_memlimit INTEGER, kdf_opslimit INTEGER, kdf_alg INTEGER, schema_version INTEGER NOT NULL)",
+          "CREATE TABLE vault_meta (id INTEGER PRIMARY KEY CHECK (id = 1), verifier_blob BLOB)",
+          "INSERT INTO crypto_meta (id, kdf_salt, kdf_memlimit, kdf_opslimit, kdf_alg, schema_version) VALUES (1, NULL, NULL, NULL, NULL, 1)",
+          "INSERT INTO vault_meta (id, verifier_blob) VALUES (1, NULL)"};
+
+      for (const QString& statement : statements) {
+        QSqlQuery query(db);
+        if (!query.exec(statement)) {
+          ok = false;
+          break;
+        }
+      }
+    }
+    db.close();
+  }
+  QSqlDatabase::removeDatabase(connectionName);
+  return ok;
+}
+
+bool runMigrationVersioningIntegration() {
+  QTemporaryDir tempDir;
+  if (!check(tempDir.isValid(), "temporary test directory (migration) created")) {
+    return false;
+  }
+
+  const QString dbPath = tempDir.filePath("legacy-v1.db");
+  if (!check(createLegacyVersion1Database(dbPath), "legacy version-1 database created")) {
+    return false;
+  }
+
+  DatabaseManager dbm(dbPath);
+  if (!check(dbm.initialize(), "database initialized from legacy version-1 schema")) {
+    return false;
+  }
+
+  QSqlDatabase db = dbm.database();
+  if (!check(tableHasColumn(db, "gateways", "folder_id"), "migration adds gateways.folder_id")) {
+    return false;
+  }
+  if (!check(tableHasColumn(db, "gateways", "allow_any_folder"), "migration adds gateways.allow_any_folder")) {
+    return false;
+  }
+  if (!check(tableHasColumn(db, "credentials", "folder_id"), "migration adds credentials.folder_id")) {
+    return false;
+  }
+  if (!check(tableHasColumn(db, "credentials", "allow_any_folder"),
+             "migration adds credentials.allow_any_folder")) {
+    return false;
+  }
+  if (!check(tableHasColumn(db, "connections", "username"), "migration adds connections.username")) {
+    return false;
+  }
+  if (!check(tableHasColumn(db, "connections", "domain"), "migration adds connections.domain")) {
+    return false;
+  }
+  if (!check(tableHasColumn(db, "connections", "secret_id"), "migration adds connections.secret_id")) {
+    return false;
+  }
+
+  QSqlQuery versionQuery(db);
+  if (!check(versionQuery.exec("SELECT schema_version FROM crypto_meta WHERE id = 1") && versionQuery.next() &&
+                 versionQuery.value(0).toInt() == 3,
+             "schema version upgraded to latest")) {
+    return false;
+  }
+
+  return true;
 }
 
 bool runVaultAndRepoIntegration() {
@@ -587,6 +685,7 @@ int main(int argc, char** argv) {
   QCoreApplication app(argc, argv);
 
   bool ok = true;
+  ok = runMigrationVersioningIntegration() && ok;
   ok = runVaultAndRepoIntegration() && ok;
   ok = runConnectionCredentialPolicyIntegration() && ok;
   ok = runRepositoryMoveAndGatewayScopeIntegration() && ok;

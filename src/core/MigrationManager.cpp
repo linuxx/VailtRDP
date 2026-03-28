@@ -5,10 +5,17 @@
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QStringList>
+#include <QVariant>
 
 namespace {
 
-constexpr const char* kInitialSchemaSql = R"SQL(
+constexpr int kSchemaVersionInitial = 1;
+constexpr int kSchemaVersionScopedFolders = 2;
+constexpr int kSchemaVersionConnectionOwnedCredentials = 3;
+constexpr int kCurrentSchemaVersion = kSchemaVersionConnectionOwnedCredentials;
+
+QString initialSchemaSql() {
+  return QStringLiteral(R"SQL(
 CREATE TABLE IF NOT EXISTS folders (
   id TEXT PRIMARY KEY,
   parent_id TEXT NULL,
@@ -25,9 +32,6 @@ CREATE TABLE IF NOT EXISTS connections (
   port INTEGER NOT NULL,
   gateway_id TEXT NULL,
   credential_id TEXT NULL,
-  username TEXT NULL,
-  domain TEXT NULL,
-  secret_id TEXT NULL,
   resolution TEXT,
   color_depth INTEGER,
   options_json TEXT,
@@ -36,8 +40,7 @@ CREATE TABLE IF NOT EXISTS connections (
   last_connected_at INTEGER,
   FOREIGN KEY(folder_id) REFERENCES folders(id),
   FOREIGN KEY(gateway_id) REFERENCES gateways(id),
-  FOREIGN KEY(credential_id) REFERENCES credentials(id),
-  FOREIGN KEY(secret_id) REFERENCES secrets(id)
+  FOREIGN KEY(credential_id) REFERENCES credentials(id)
 );
 
 CREATE TABLE IF NOT EXISTS gateways (
@@ -45,25 +48,19 @@ CREATE TABLE IF NOT EXISTS gateways (
   name TEXT NOT NULL,
   host TEXT NOT NULL,
   port INTEGER NOT NULL,
-  folder_id TEXT NULL,
-  allow_any_folder INTEGER NOT NULL DEFAULT 0,
   credential_mode INTEGER NOT NULL,
   credential_id TEXT NULL,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY(folder_id) REFERENCES folders(id),
   FOREIGN KEY(credential_id) REFERENCES credentials(id)
 );
 
 CREATE TABLE IF NOT EXISTS credentials (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
-  folder_id TEXT NULL,
-  allow_any_folder INTEGER NOT NULL DEFAULT 0,
   username TEXT NOT NULL,
   domain TEXT NULL,
   secret_id TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY(folder_id) REFERENCES folders(id),
   FOREIGN KEY(secret_id) REFERENCES secrets(id)
 );
 
@@ -103,7 +100,7 @@ INSERT OR IGNORE INTO crypto_meta (
   NULL,
   NULL,
   NULL,
-  1
+  %1
 );
 
 INSERT OR IGNORE INTO vault_meta (
@@ -113,150 +110,138 @@ INSERT OR IGNORE INTO vault_meta (
   1,
   NULL
 );
-)SQL";
+)SQL").arg(kSchemaVersionInitial);
+}
 
-}  // namespace
-
-bool MigrationManager::applyInitialSchema(QSqlDatabase& database) const {
+bool execStatements(QSqlDatabase& database, const QString& sql, const QString& errorPrefix) {
   QSqlQuery query(database);
-
-  if (!database.transaction()) {
-    qCritical() << "Failed to start migration transaction:" << database.lastError().text();
-    return false;
-  }
-
-  const QString schemaSql = QString::fromUtf8(kInitialSchemaSql);
-  const QStringList statements = schemaSql.split(';', Qt::SkipEmptyParts);
-
+  const QStringList statements = sql.split(';', Qt::SkipEmptyParts);
   for (QString statement : statements) {
     statement = statement.trimmed();
     if (statement.isEmpty()) {
       continue;
     }
-
     if (!query.exec(statement)) {
-      qCritical() << "Failed to apply schema statement:" << query.lastError().text();
+      qCritical() << errorPrefix << query.lastError().text();
       qCritical() << "Statement:" << statement;
+      return false;
+    }
+  }
+  return true;
+}
+
+bool tableHasColumn(QSqlDatabase& database, const QString& tableName, const QString& columnName) {
+  QSqlQuery query(database);
+  if (!query.exec(QString("PRAGMA table_info(%1)").arg(tableName))) {
+    qCritical() << "Failed to inspect" << tableName << "schema:" << query.lastError().text();
+    return false;
+  }
+
+  while (query.next()) {
+    if (query.value(1).toString() == columnName) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ensureColumnExists(QSqlDatabase& database, const QString& tableName, const QString& columnName,
+                        const QString& columnSql) {
+  const bool hasColumn = tableHasColumn(database, tableName, columnName);
+  if (hasColumn) {
+    return true;
+  }
+
+  QSqlQuery alter(database);
+  if (!alter.exec(columnSql)) {
+    qCritical() << "Failed to migrate" << tableName << "table:" << alter.lastError().text();
+    qCritical() << "Statement:" << columnSql;
+    return false;
+  }
+  return true;
+}
+
+std::optional<int> readSchemaVersion(QSqlDatabase& database) {
+  QSqlQuery query(database);
+  if (!query.exec("SELECT schema_version FROM crypto_meta WHERE id = 1")) {
+    qCritical() << "Failed to read schema version:" << query.lastError().text();
+    return std::nullopt;
+  }
+  if (!query.next()) {
+    qCritical() << "crypto_meta row missing while reading schema version";
+    return std::nullopt;
+  }
+  return query.value(0).toInt();
+}
+
+bool writeSchemaVersion(QSqlDatabase& database, int version) {
+  QSqlQuery query(database);
+  query.prepare("UPDATE crypto_meta SET schema_version = ? WHERE id = 1");
+  query.addBindValue(version);
+  if (!query.exec()) {
+    qCritical() << "Failed to update schema version:" << query.lastError().text();
+    return false;
+  }
+  return query.numRowsAffected() > 0;
+}
+
+bool applyMigration2(QSqlDatabase& database) {
+  return ensureColumnExists(database, "gateways", "folder_id", "ALTER TABLE gateways ADD COLUMN folder_id TEXT NULL") &&
+         ensureColumnExists(database, "gateways", "allow_any_folder",
+                            "ALTER TABLE gateways ADD COLUMN allow_any_folder INTEGER NOT NULL DEFAULT 0") &&
+         ensureColumnExists(database, "credentials", "folder_id",
+                            "ALTER TABLE credentials ADD COLUMN folder_id TEXT NULL") &&
+         ensureColumnExists(database, "credentials", "allow_any_folder",
+                            "ALTER TABLE credentials ADD COLUMN allow_any_folder INTEGER NOT NULL DEFAULT 0");
+}
+
+bool applyMigration3(QSqlDatabase& database) {
+  return ensureColumnExists(database, "connections", "username",
+                            "ALTER TABLE connections ADD COLUMN username TEXT NULL") &&
+         ensureColumnExists(database, "connections", "domain",
+                            "ALTER TABLE connections ADD COLUMN domain TEXT NULL") &&
+         ensureColumnExists(database, "connections", "secret_id",
+                            "ALTER TABLE connections ADD COLUMN secret_id TEXT NULL");
+}
+
+}  // namespace
+
+bool MigrationManager::applyInitialSchema(QSqlDatabase& database) const {
+  if (!database.transaction()) {
+    qCritical() << "Failed to start migration transaction:" << database.lastError().text();
+    return false;
+  }
+
+  const QString schemaSql = initialSchemaSql();
+  if (!execStatements(database, schemaSql, "Failed to apply schema statement:")) {
+    database.rollback();
+    return false;
+  }
+
+  auto maybeSchemaVersion = readSchemaVersion(database);
+  if (!maybeSchemaVersion.has_value()) {
+    database.rollback();
+    return false;
+  }
+
+  int schemaVersion = maybeSchemaVersion.value();
+  if (schemaVersion < kSchemaVersionScopedFolders) {
+    if (!applyMigration2(database) || !writeSchemaVersion(database, kSchemaVersionScopedFolders)) {
       database.rollback();
       return false;
     }
+    schemaVersion = kSchemaVersionScopedFolders;
   }
 
-  auto ensureGatewayColumn = [&](const QString& columnSql) -> bool {
-    QSqlQuery alter(database);
-    if (!alter.exec(columnSql)) {
-      qCritical() << "Failed to migrate gateways table:" << alter.lastError().text();
-      qCritical() << "Statement:" << columnSql;
+  if (schemaVersion < kSchemaVersionConnectionOwnedCredentials) {
+    if (!applyMigration3(database) || !writeSchemaVersion(database, kSchemaVersionConnectionOwnedCredentials)) {
+      database.rollback();
       return false;
     }
-    return true;
-  };
-  auto ensureCredentialColumn = [&](const QString& columnSql) -> bool {
-    QSqlQuery alter(database);
-    if (!alter.exec(columnSql)) {
-      qCritical() << "Failed to migrate credentials table:" << alter.lastError().text();
-      qCritical() << "Statement:" << columnSql;
-      return false;
-    }
-    return true;
-  };
-
-  QSqlQuery tableInfo(database);
-  if (!tableInfo.exec("PRAGMA table_info(gateways)")) {
-    qCritical() << "Failed to inspect gateways schema:" << tableInfo.lastError().text();
-    database.rollback();
-    return false;
+    schemaVersion = kSchemaVersionConnectionOwnedCredentials;
   }
 
-  bool hasFolderId = false;
-  bool hasAllowAnyFolder = false;
-  while (tableInfo.next()) {
-    const QString name = tableInfo.value(1).toString();
-    if (name == "folder_id") {
-      hasFolderId = true;
-    } else if (name == "allow_any_folder") {
-      hasAllowAnyFolder = true;
-    }
-  }
-
-  if (!hasFolderId && !ensureGatewayColumn("ALTER TABLE gateways ADD COLUMN folder_id TEXT NULL")) {
-    database.rollback();
-    return false;
-  }
-  if (!hasAllowAnyFolder &&
-      !ensureGatewayColumn("ALTER TABLE gateways ADD COLUMN allow_any_folder INTEGER NOT NULL DEFAULT 0")) {
-    database.rollback();
-    return false;
-  }
-
-  QSqlQuery credentialTableInfo(database);
-  if (!credentialTableInfo.exec("PRAGMA table_info(credentials)")) {
-    qCritical() << "Failed to inspect credentials schema:" << credentialTableInfo.lastError().text();
-    database.rollback();
-    return false;
-  }
-  bool hasCredentialFolderId = false;
-  bool hasCredentialAllowAnyFolder = false;
-  while (credentialTableInfo.next()) {
-    const QString name = credentialTableInfo.value(1).toString();
-    if (name == "folder_id") {
-      hasCredentialFolderId = true;
-    } else if (name == "allow_any_folder") {
-      hasCredentialAllowAnyFolder = true;
-    }
-  }
-  if (!hasCredentialFolderId &&
-      !ensureCredentialColumn("ALTER TABLE credentials ADD COLUMN folder_id TEXT NULL")) {
-    database.rollback();
-    return false;
-  }
-  if (!hasCredentialAllowAnyFolder &&
-      !ensureCredentialColumn("ALTER TABLE credentials ADD COLUMN allow_any_folder INTEGER NOT NULL DEFAULT 0")) {
-    database.rollback();
-    return false;
-  }
-
-  auto ensureConnectionColumn = [&](const QString& columnSql) -> bool {
-    QSqlQuery alter(database);
-    if (!alter.exec(columnSql)) {
-      qCritical() << "Failed to migrate connections table:" << alter.lastError().text();
-      qCritical() << "Statement:" << columnSql;
-      return false;
-    }
-    return true;
-  };
-
-  QSqlQuery connectionTableInfo(database);
-  if (!connectionTableInfo.exec("PRAGMA table_info(connections)")) {
-    qCritical() << "Failed to inspect connections schema:" << connectionTableInfo.lastError().text();
-    database.rollback();
-    return false;
-  }
-  bool hasConnectionUsername = false;
-  bool hasConnectionDomain = false;
-  bool hasConnectionSecretId = false;
-  while (connectionTableInfo.next()) {
-    const QString name = connectionTableInfo.value(1).toString();
-    if (name == "username") {
-      hasConnectionUsername = true;
-    } else if (name == "domain") {
-      hasConnectionDomain = true;
-    } else if (name == "secret_id") {
-      hasConnectionSecretId = true;
-    }
-  }
-  if (!hasConnectionUsername &&
-      !ensureConnectionColumn("ALTER TABLE connections ADD COLUMN username TEXT NULL")) {
-    database.rollback();
-    return false;
-  }
-  if (!hasConnectionDomain &&
-      !ensureConnectionColumn("ALTER TABLE connections ADD COLUMN domain TEXT NULL")) {
-    database.rollback();
-    return false;
-  }
-  if (!hasConnectionSecretId &&
-      !ensureConnectionColumn("ALTER TABLE connections ADD COLUMN secret_id TEXT NULL")) {
+  if (schemaVersion != kCurrentSchemaVersion && !writeSchemaVersion(database, kCurrentSchemaVersion)) {
     database.rollback();
     return false;
   }
