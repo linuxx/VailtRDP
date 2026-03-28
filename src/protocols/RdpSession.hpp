@@ -49,6 +49,8 @@ Q_SIGNALS:
   void setState(SessionState newState);
   void ensureWorkerThread();
   void shutdownWorkerThread();
+  bool requestWorkerStop(bool blockUntilStopped);
+  bool isOnWorkerThread() const;
 
   QString host_;
   int port_;

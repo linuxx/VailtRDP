@@ -1410,16 +1410,7 @@ void RdpSession::connectSession() {
 
 void RdpSession::disconnectSession() {
   qInfo().noquote() << "[rdp-session id=" + sessionTag_ + "] disconnect requested";
-  if (worker_ != nullptr && !stopIssued_) {
-    stopIssued_ = true;
-    if (QThread::currentThread() == workerThread_.thread()) {
-      QMetaObject::invokeMethod(worker_, "stop", Qt::DirectConnection);
-    } else if (workerThread_.isRunning()) {
-      QMetaObject::invokeMethod(worker_, "stop", Qt::BlockingQueuedConnection);
-    } else {
-      QMetaObject::invokeMethod(worker_, "stop", Qt::DirectConnection);
-    }
-  }
+  requestWorkerStop(false);
   setState(SessionState::Disconnected);
 }
 
@@ -1542,6 +1533,10 @@ void RdpSession::ensureWorkerThread() {
   stopIssued_ = false;
 
   connect(&workerThread_, &QThread::finished, worker_, &QObject::deleteLater);
+  connect(&workerThread_, &QThread::finished, this, [this]() {
+    worker_ = nullptr;
+    stopIssued_ = false;
+  });
   connect(worker_, &RdpSessionWorker::stateChanged, this, [this](SessionState s) { setState(s); });
   connect(worker_, &RdpSessionWorker::errorOccurred, this, &RdpSession::errorOccurred);
   connect(worker_, &RdpSessionWorker::frameReady, this, &RdpSession::frameUpdated);
@@ -1555,21 +1550,30 @@ void RdpSession::ensureWorkerThread() {
   }
 }
 
+bool RdpSession::requestWorkerStop(bool blockUntilStopped) {
+  if (worker_ == nullptr || stopIssued_) {
+    return false;
+  }
+
+  stopIssued_ = true;
+  if (!workerThread_.isRunning()) {
+    qInfo().noquote() << "[rdp-session id=" + sessionTag_ + "] worker thread already stopped; skipping stop invoke";
+    return false;
+  }
+
+  const Qt::ConnectionType connectionType =
+      isOnWorkerThread() ? Qt::DirectConnection
+                         : (blockUntilStopped ? Qt::BlockingQueuedConnection : Qt::QueuedConnection);
+  return QMetaObject::invokeMethod(worker_, "stop", connectionType);
+}
+
+bool RdpSession::isOnWorkerThread() const {
+  return QThread::currentThread() == &workerThread_;
+}
+
 void RdpSession::shutdownWorkerThread() {
   qInfo().noquote() << "[rdp-session id=" + sessionTag_ + "] shutdown begin";
-  if (worker_ != nullptr) {
-    if (!stopIssued_) {
-      stopIssued_ = true;
-      if (QThread::currentThread() == workerThread_.thread()) {
-        QMetaObject::invokeMethod(worker_, "stop", Qt::DirectConnection);
-      } else if (workerThread_.isRunning()) {
-        QMetaObject::invokeMethod(worker_, "stop", Qt::BlockingQueuedConnection);
-      } else {
-        QMetaObject::invokeMethod(worker_, "stop", Qt::DirectConnection);
-      }
-    }
-    worker_ = nullptr;
-  }
+  requestWorkerStop(true);
 
   if (workerThread_.isRunning()) {
     workerThread_.quit();
@@ -1598,6 +1602,7 @@ void RdpSession::shutdownWorkerThread() {
       }
     }
   }
+  worker_ = nullptr;
   qInfo().noquote() << "[rdp-session id=" + sessionTag_ + "] shutdown complete";
 }
 
