@@ -19,6 +19,7 @@ struct ConnectionLaunchInfo {
   std::optional<QString> username;
   std::optional<QString> domain;
   std::optional<QString> password;
+  bool promptEveryTime = false;
   std::optional<QString> gatewayHost;
   int gatewayPort = 443;
   vaultrdp::model::GatewayCredentialMode gatewayCredentialMode =
@@ -35,12 +36,16 @@ class ConnectionRepository {
 
   std::optional<vaultrdp::model::Connection> createConnection(
       const QString& name, const QString& host, int port, const std::optional<QString>& folderId,
-      const std::optional<QString>& credentialId, const std::optional<QString>& gatewayId = std::nullopt,
+      const std::optional<QString>& credentialId, const std::optional<QString>& username = std::nullopt,
+      const std::optional<QString>& domain = std::nullopt, const std::optional<QString>& secretId = std::nullopt,
+      const std::optional<QString>& gatewayId = std::nullopt,
       const QString& optionsJson = "{}") const;
 
   std::optional<vaultrdp::model::Connection> duplicateConnection(const QString& id) const;
   bool updateConnection(const QString& id, const QString& name, const QString& host, int port,
-                        const std::optional<QString>& credentialId, const std::optional<QString>& gatewayId,
+                        const std::optional<QString>& credentialId, const std::optional<QString>& username,
+                        const std::optional<QString>& domain, const std::optional<QString>& secretId,
+                        const std::optional<QString>& gatewayId,
                         const QString& optionsJson) const;
   bool updateConnectionOptionsJson(const QString& id, const QString& optionsJson) const;
   bool renameConnection(const QString& id, const QString& newName) const;

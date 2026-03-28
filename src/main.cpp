@@ -9,7 +9,6 @@
 #include "core/AppPaths.hpp"
 #include "core/DatabaseManager.hpp"
 #include "core/VaultManager.hpp"
-#include "system/ScreenLockMonitor.hpp"
 #include "ui/MainWindow.hpp"
 
 int main(int argc, char* argv[]) {
@@ -51,17 +50,6 @@ int main(int argc, char* argv[]) {
 
   vaultrdp::core::VaultManager vaultManager(&databaseManager);
   MainWindow mainWindow(&databaseManager, &vaultManager);
-
-  vaultrdp::system::ScreenLockMonitor screenLockMonitor;
-  QObject::connect(&screenLockMonitor, &vaultrdp::system::ScreenLockMonitor::screenLockChanged,
-                   [&vaultManager, &mainWindow](bool locked) {
-                     qInfo() << "Screen lock changed. Locked =" << locked;
-                     if (locked) {
-                       vaultManager.lock();
-                       mainWindow.refreshVaultUi();
-                     }
-                   });
-  screenLockMonitor.start();
 
   mainWindow.show();
 

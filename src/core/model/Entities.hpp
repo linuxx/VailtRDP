@@ -33,6 +33,9 @@ struct Connection {
   int port = 3389;
   std::optional<QString> gatewayId;
   std::optional<QString> credentialId;
+  std::optional<QString> username;
+  std::optional<QString> domain;
+  std::optional<QString> secretId;
   std::optional<QString> resolution;
   std::optional<int> colorDepth;
   QString optionsJson;

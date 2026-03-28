@@ -16,6 +16,7 @@ class QTabWidget;
 enum class ConnectionCredentialSource : int {
   EnterCredentials = 0,
   SavedCredentialSet = 1,
+  PromptEveryTime = 2,
 };
 
 class NewConnectionDialog : public QDialog {
@@ -28,6 +29,7 @@ class NewConnectionDialog : public QDialog {
   void setCredentialOptions(const std::vector<std::pair<QString, QString>>& credentialOptions);
   void setInitialValues(const QString& connectionName, const QString& host, int port, const QString& username,
                         const QString& domain, const QString& password, bool saveCredential,
+                        bool promptEveryTime,
                         bool enableClipboard, bool mapHomeDrive,
                         const std::optional<QString>& selectedGatewayId,
                         const std::optional<QString>& selectedCredentialId = std::nullopt);
@@ -41,6 +43,7 @@ class NewConnectionDialog : public QDialog {
   bool saveCredential() const;
   ConnectionCredentialSource credentialSource() const;
   bool useSavedCredentialSet() const;
+  bool promptEveryTime() const;
   std::optional<QString> selectedCredentialSetId() const;
   bool enableClipboard() const;
   bool mapHomeDrive() const;

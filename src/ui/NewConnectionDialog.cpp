@@ -42,6 +42,8 @@ NewConnectionDialog::NewConnectionDialog(QWidget* parent)
                                   static_cast<int>(ConnectionCredentialSource::EnterCredentials));
   credentialSourceCombo_->addItem("Use Saved Credential Set",
                                   static_cast<int>(ConnectionCredentialSource::SavedCredentialSet));
+  credentialSourceCombo_->addItem("Prompt Every Time",
+                                  static_cast<int>(ConnectionCredentialSource::PromptEveryTime));
   credentialSetCombo_->addItem("Select saved credential...", QVariant());
   saveCredentialCheck_->setChecked(true);
   enableClipboardCheck_->setChecked(true);
@@ -122,6 +124,7 @@ void NewConnectionDialog::setCredentialOptions(const std::vector<std::pair<QStri
 void NewConnectionDialog::setInitialValues(const QString& connectionName, const QString& host, int port,
                                            const QString& username, const QString& domain,
                                            const QString& password, bool saveCredential,
+                                           bool promptEveryTime,
                                            bool enableClipboard, bool mapHomeDrive,
                                            const std::optional<QString>& selectedGatewayId,
                                            const std::optional<QString>& selectedCredentialId) {
@@ -148,6 +151,10 @@ void NewConnectionDialog::setInitialValues(const QString& connectionName, const 
     credentialSetCombo_->setCurrentIndex(credentialIndex >= 0 ? credentialIndex : 0);
     credentialSourceCombo_->setCurrentIndex(
         credentialSourceCombo_->findData(static_cast<int>(ConnectionCredentialSource::SavedCredentialSet)));
+  } else if (promptEveryTime) {
+    credentialSetCombo_->setCurrentIndex(0);
+    credentialSourceCombo_->setCurrentIndex(
+        credentialSourceCombo_->findData(static_cast<int>(ConnectionCredentialSource::PromptEveryTime)));
   } else {
     credentialSetCombo_->setCurrentIndex(0);
     credentialSourceCombo_->setCurrentIndex(
@@ -169,21 +176,21 @@ int NewConnectionDialog::port() const {
 }
 
 QString NewConnectionDialog::username() const {
-  if (useSavedCredentialSet()) {
+  if (useSavedCredentialSet() || promptEveryTime()) {
     return QString();
   }
   return usernameEdit_->text().trimmed();
 }
 
 QString NewConnectionDialog::domain() const {
-  if (useSavedCredentialSet()) {
+  if (useSavedCredentialSet() || promptEveryTime()) {
     return QString();
   }
   return domainEdit_->text().trimmed();
 }
 
 QString NewConnectionDialog::password() const {
-  if (useSavedCredentialSet()) {
+  if (useSavedCredentialSet() || promptEveryTime()) {
     return QString();
   }
   return passwordEdit_->text();
@@ -199,6 +206,10 @@ ConnectionCredentialSource NewConnectionDialog::credentialSource() const {
 
 bool NewConnectionDialog::useSavedCredentialSet() const {
   return credentialSource() == ConnectionCredentialSource::SavedCredentialSet;
+}
+
+bool NewConnectionDialog::promptEveryTime() const {
+  return credentialSource() == ConnectionCredentialSource::PromptEveryTime;
 }
 
 std::optional<QString> NewConnectionDialog::selectedCredentialSetId() const {
@@ -238,21 +249,22 @@ std::optional<QString> NewConnectionDialog::selectedGatewayId() const {
 
 void NewConnectionDialog::updateCredentialUi() {
   const bool useSaved = credentialSource() == ConnectionCredentialSource::SavedCredentialSet;
+  const bool promptEveryTimeMode = credentialSource() == ConnectionCredentialSource::PromptEveryTime;
   credentialSetCombo_->setEnabled(useSaved);
   if (credentialSetLabel_ != nullptr) {
     credentialSetLabel_->setEnabled(useSaved);
   }
-  usernameEdit_->setEnabled(!useSaved);
+  usernameEdit_->setEnabled(!useSaved && !promptEveryTimeMode);
   if (usernameLabel_ != nullptr) {
-    usernameLabel_->setEnabled(!useSaved);
+    usernameLabel_->setEnabled(!useSaved && !promptEveryTimeMode);
   }
-  domainEdit_->setEnabled(!useSaved);
+  domainEdit_->setEnabled(!useSaved && !promptEveryTimeMode);
   if (domainLabel_ != nullptr) {
-    domainLabel_->setEnabled(!useSaved);
+    domainLabel_->setEnabled(!useSaved && !promptEveryTimeMode);
   }
-  passwordEdit_->setEnabled(!useSaved);
+  passwordEdit_->setEnabled(!useSaved && !promptEveryTimeMode);
   if (passwordLabel_ != nullptr) {
-    passwordLabel_->setEnabled(!useSaved);
+    passwordLabel_->setEnabled(!useSaved && !promptEveryTimeMode);
   }
-  saveCredentialCheck_->setEnabled(!useSaved);
+  saveCredentialCheck_->setEnabled(!useSaved && !promptEveryTimeMode);
 }

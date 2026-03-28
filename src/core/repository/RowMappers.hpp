@@ -35,7 +35,8 @@ inline vaultrdp::model::Gateway gatewayFromQuery(QSqlQuery& query, int idCol, in
 
 inline vaultrdp::model::Connection connectionFromQuery(QSqlQuery& query, int idCol, int folderIdCol, int nameCol,
                                                        int protocolCol, int hostCol, int portCol, int gatewayIdCol,
-                                                       int credentialIdCol, int resolutionCol, int colorDepthCol,
+                                                       int credentialIdCol, int usernameCol, int domainCol,
+                                                       int secretIdCol, int resolutionCol, int colorDepthCol,
                                                        int optionsCol, int createdAtCol, int updatedAtCol,
                                                        int lastConnectedAtCol) {
   vaultrdp::model::Connection connection;
@@ -47,6 +48,9 @@ inline vaultrdp::model::Connection connectionFromQuery(QSqlQuery& query, int idC
   connection.port = query.value(portCol).toInt();
   connection.gatewayId = sql::optionalString(query.value(gatewayIdCol));
   connection.credentialId = sql::optionalString(query.value(credentialIdCol));
+  connection.username = sql::optionalString(query.value(usernameCol));
+  connection.domain = sql::optionalString(query.value(domainCol));
+  connection.secretId = sql::optionalString(query.value(secretIdCol));
   if (!query.value(resolutionCol).isNull()) {
     connection.resolution = query.value(resolutionCol).toString();
   }

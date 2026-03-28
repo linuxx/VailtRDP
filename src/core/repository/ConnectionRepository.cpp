@@ -19,7 +19,9 @@ ConnectionRepository::ConnectionRepository(DatabaseManager* databaseManager) : d
 
 std::optional<vaultrdp::model::Connection> ConnectionRepository::createConnection(
     const QString& name, const QString& host, int port, const std::optional<QString>& folderId,
-    const std::optional<QString>& credentialId, const std::optional<QString>& gatewayId,
+    const std::optional<QString>& credentialId, const std::optional<QString>& username,
+    const std::optional<QString>& domain, const std::optional<QString>& secretId,
+    const std::optional<QString>& gatewayId,
     const QString& optionsJson) const {
   if (name.trimmed().isEmpty() || host.trimmed().isEmpty() || port <= 0 || port > 65535) {
     return std::nullopt;
@@ -35,6 +37,9 @@ std::optional<vaultrdp::model::Connection> ConnectionRepository::createConnectio
   }
   connection.protocol = vaultrdp::model::Protocol::Rdp;
   connection.credentialId = credentialId;
+  connection.username = username;
+  connection.domain = domain;
+  connection.secretId = secretId;
   connection.gatewayId = gatewayId;
   connection.optionsJson = optionsJson.trimmed().isEmpty() ? "{}" : optionsJson;
   connection.createdAt = QDateTime::currentSecsSinceEpoch();
@@ -43,9 +48,9 @@ std::optional<vaultrdp::model::Connection> ConnectionRepository::createConnectio
   QSqlDatabase db = databaseManager_->database();
   QSqlQuery query(db);
   query.prepare(
-      "INSERT INTO connections (id, folder_id, name, protocol, host, port, gateway_id, credential_id, resolution, "
-      "color_depth, options_json, created_at, updated_at, last_connected_at) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+      "INSERT INTO connections (id, folder_id, name, protocol, host, port, gateway_id, credential_id, username, "
+      "domain, secret_id, resolution, color_depth, options_json, created_at, updated_at, last_connected_at) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
   query.addBindValue(connection.id);
   query.addBindValue(sql::nullableString(connection.folderId));
 
@@ -55,6 +60,9 @@ std::optional<vaultrdp::model::Connection> ConnectionRepository::createConnectio
   query.addBindValue(connection.port);
   query.addBindValue(sql::nullableString(connection.gatewayId));
   query.addBindValue(sql::nullableString(connection.credentialId));
+  query.addBindValue(sql::nullableString(connection.username));
+  query.addBindValue(sql::nullableString(connection.domain));
+  query.addBindValue(sql::nullableString(connection.secretId));
 
   query.addBindValue(QVariant());
   query.addBindValue(QVariant());
@@ -80,11 +88,14 @@ std::optional<vaultrdp::model::Connection> ConnectionRepository::duplicateConnec
   const QString duplicatedName = src.name + " Copy";
   return createConnection(duplicatedName, src.host, src.port,
                           src.folderId.isEmpty() ? std::nullopt : std::optional<QString>(src.folderId),
-                          src.credentialId, src.gatewayId, src.optionsJson);
+                          src.credentialId, src.username, src.domain, src.secretId, src.gatewayId, src.optionsJson);
 }
 
 bool ConnectionRepository::updateConnection(const QString& id, const QString& name, const QString& host, int port,
                                             const std::optional<QString>& credentialId,
+                                            const std::optional<QString>& username,
+                                            const std::optional<QString>& domain,
+                                            const std::optional<QString>& secretId,
                                             const std::optional<QString>& gatewayId,
                                             const QString& optionsJson) const {
   if (id.trimmed().isEmpty() || name.trimmed().isEmpty() || host.trimmed().isEmpty() || port <= 0 || port > 65535) {
@@ -94,12 +105,16 @@ bool ConnectionRepository::updateConnection(const QString& id, const QString& na
   QSqlDatabase db = databaseManager_->database();
   QSqlQuery query(db);
   query.prepare(
-      "UPDATE connections SET name = ?, host = ?, port = ?, credential_id = ?, gateway_id = ?, "
+      "UPDATE connections SET name = ?, host = ?, port = ?, credential_id = ?, username = ?, domain = ?, "
+      "secret_id = ?, gateway_id = ?, "
       "options_json = ?, updated_at = ? WHERE id = ?");
   query.addBindValue(name.trimmed());
   query.addBindValue(host.trimmed());
   query.addBindValue(port);
   query.addBindValue(sql::nullableString(credentialId));
+  query.addBindValue(sql::nullableString(username));
+  query.addBindValue(sql::nullableString(domain));
+  query.addBindValue(sql::nullableString(secretId));
   query.addBindValue(sql::nullableString(gatewayId));
   query.addBindValue(optionsJson.trimmed().isEmpty() ? QString("{}") : optionsJson);
   query.addBindValue(QDateTime::currentSecsSinceEpoch());
@@ -172,12 +187,48 @@ bool ConnectionRepository::deleteConnection(const QString& id) const {
 
   QSqlDatabase db = databaseManager_->database();
   QSqlQuery query(db);
+  query.prepare("SELECT secret_id FROM connections WHERE id = ?");
+  query.addBindValue(id);
+  if (!sql::execOrLog(query, "Failed to query connection secret before delete:")) {
+    return false;
+  }
+  std::optional<QString> secretId;
+  if (query.next()) {
+    secretId = sql::optionalString(query.value(0));
+  }
+
+  if (!db.transaction()) {
+    qCritical() << "Failed to start connection delete transaction:" << db.lastError().text();
+    return false;
+  }
+
   query.prepare("DELETE FROM connections WHERE id = ?");
   query.addBindValue(id);
   if (!sql::execOrLog(query, "Failed to delete connection:")) {
+    db.rollback();
     return false;
   }
-  return query.numRowsAffected() > 0;
+  if (query.numRowsAffected() <= 0) {
+    db.rollback();
+    return false;
+  }
+
+  if (secretId.has_value()) {
+    QSqlQuery deleteSecret(db);
+    deleteSecret.prepare("DELETE FROM secrets WHERE id = ?");
+    deleteSecret.addBindValue(secretId.value());
+    if (!sql::execOrLog(deleteSecret, "Failed to delete connection-owned secret:")) {
+      db.rollback();
+      return false;
+    }
+  }
+
+  if (!db.commit()) {
+    qCritical() << "Failed to commit connection delete transaction:" << db.lastError().text();
+    db.rollback();
+    return false;
+  }
+  return true;
 }
 
 std::optional<QString> ConnectionRepository::findUsernameByConnectionId(const QString& id) const {
@@ -188,7 +239,7 @@ std::optional<QString> ConnectionRepository::findUsernameByConnectionId(const QS
   QSqlDatabase db = databaseManager_->database();
   QSqlQuery query(db);
   query.prepare(
-      "SELECT c.username "
+      "SELECT COALESCE(conn.username, c.username) "
       "FROM connections conn "
       "LEFT JOIN credentials c ON c.id = conn.credential_id "
       "WHERE conn.id = ?");
@@ -215,14 +266,17 @@ std::optional<ConnectionLaunchInfo> ConnectionRepository::resolveLaunchInfo(
   info.connection = connection.value();
 
   QSqlDatabase db = databaseManager_->database();
-  if (connection->credentialId.has_value()) {
+  if (connection->credentialId.has_value() || connection->secretId.has_value() || connection->username.has_value() ||
+      connection->domain.has_value()) {
     QSqlQuery query(db);
     query.prepare(
-        "SELECT c.username, c.domain, s.enc_blob "
-        "FROM credentials c "
-        "LEFT JOIN secrets s ON s.id = c.secret_id "
-        "WHERE c.id = ?");
-    query.addBindValue(connection->credentialId.value());
+        "SELECT conn.username, conn.domain, s_local.enc_blob, c.username, c.domain, s_shared.enc_blob "
+        "FROM connections conn "
+        "LEFT JOIN secrets s_local ON s_local.id = conn.secret_id "
+        "LEFT JOIN credentials c ON c.id = conn.credential_id "
+        "LEFT JOIN secrets s_shared ON s_shared.id = c.secret_id "
+        "WHERE conn.id = ?");
+    query.addBindValue(connection->id);
 
     if (!sql::execOrLog(query, "Failed to resolve connection credentials:")) {
       return info;
@@ -231,14 +285,21 @@ std::optional<ConnectionLaunchInfo> ConnectionRepository::resolveLaunchInfo(
     if (query.next()) {
       if (!query.value(0).isNull()) {
         info.username = query.value(0).toString();
+      } else if (!query.value(3).isNull()) {
+        info.username = query.value(3).toString();
       }
       if (!query.value(1).isNull()) {
         info.domain = query.value(1).toString();
+      } else if (!query.value(4).isNull()) {
+        info.domain = query.value(4).toString();
       }
 
-      if (!query.value(2).isNull() && vaultManager != nullptr &&
+      const QVariant localBlob = query.value(2);
+      const QVariant sharedBlob = query.value(5);
+      const QVariant chosenBlob = !localBlob.isNull() ? localBlob : sharedBlob;
+      if (!chosenBlob.isNull() && vaultManager != nullptr &&
           vaultManager->state() != vaultrdp::core::VaultState::Locked) {
-        const QByteArray blob = query.value(2).toByteArray();
+        const QByteArray blob = chosenBlob.toByteArray();
         const auto maybePassword = vaultManager->decryptSecret(blob);
         if (maybePassword.has_value()) {
           info.password = QString::fromUtf8(maybePassword.value());
@@ -315,8 +376,8 @@ std::optional<vaultrdp::model::Connection> ConnectionRepository::findConnectionB
   QSqlDatabase db = databaseManager_->database();
   QSqlQuery query(db);
   query.prepare(
-      "SELECT id, folder_id, name, protocol, host, port, gateway_id, credential_id, resolution, color_depth, "
-      "options_json, created_at, updated_at, last_connected_at FROM connections WHERE id = ?");
+      "SELECT id, folder_id, name, protocol, host, port, gateway_id, credential_id, username, domain, secret_id, "
+      "resolution, color_depth, options_json, created_at, updated_at, last_connected_at FROM connections WHERE id = ?");
   query.addBindValue(id);
 
   if (!sql::execOrLog(query, "Failed to query connection by id:")) {
@@ -327,7 +388,7 @@ std::optional<vaultrdp::model::Connection> ConnectionRepository::findConnectionB
     return std::nullopt;
   }
 
-  return rowmap::connectionFromQuery(query, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13);
+  return rowmap::connectionFromQuery(query, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
 }
 
 std::vector<vaultrdp::model::Connection> ConnectionRepository::listConnections() const {
@@ -336,14 +397,15 @@ std::vector<vaultrdp::model::Connection> ConnectionRepository::listConnections()
   QSqlDatabase db = databaseManager_->database();
   QSqlQuery query(db);
   query.prepare(
-      "SELECT id, folder_id, name, protocol, host, port, gateway_id, credential_id, resolution, color_depth, "
-      "options_json, created_at, updated_at, last_connected_at FROM connections ORDER BY name");
+      "SELECT id, folder_id, name, protocol, host, port, gateway_id, credential_id, username, domain, secret_id, "
+      "resolution, color_depth, options_json, created_at, updated_at, last_connected_at FROM connections ORDER BY name");
   if (!sql::execOrLog(query, "Failed to query connections:")) {
     return connections;
   }
 
   while (query.next()) {
-    connections.push_back(rowmap::connectionFromQuery(query, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13));
+    connections.push_back(rowmap::connectionFromQuery(query, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+                                                      16));
   }
 
   return connections;

@@ -88,7 +88,8 @@ bool runVaultAndRepoIntegration() {
   }
 
   const auto maybeConnection = connectionRepo.createConnection("Test Connection", "127.0.0.1", 3389,
-                                                               std::nullopt, maybeCredential->id, std::nullopt, "{}");
+                                                               std::nullopt, maybeCredential->id, std::nullopt,
+                                                               std::nullopt, std::nullopt, std::nullopt, "{}");
   if (!check(maybeConnection.has_value(), "connection created")) {
     return false;
   }
@@ -266,7 +267,8 @@ bool runRepositoryMoveAndGatewayScopeIntegration() {
   }
 
   const auto connection =
-      connectionRepo.createConnection("ConnA", "10.0.0.1", 3389, folderA->id, std::nullopt, std::nullopt, "{}");
+      connectionRepo.createConnection("ConnA", "10.0.0.1", 3389, folderA->id, std::nullopt, std::nullopt,
+                                      std::nullopt, std::nullopt, std::nullopt, "{}");
   if (!check(connection.has_value(), "connection created in folderA")) {
     return false;
   }

@@ -26,6 +26,9 @@ SessionRuntimeOptions parseSessionRuntimeOptions(const QString& optionsJson) {
   if (obj.contains("mapHomeDrive") && obj.value("mapHomeDrive").isBool()) {
     options.mapHomeDrive = obj.value("mapHomeDrive").toBool();
   }
+  if (obj.contains("promptEveryTime") && obj.value("promptEveryTime").isBool()) {
+    options.promptEveryTime = obj.value("promptEveryTime").toBool();
+  }
   if (obj.contains("lastSuccessfulUsername") && obj.value("lastSuccessfulUsername").isString()) {
     options.lastSuccessfulUsername = obj.value("lastSuccessfulUsername").toString().trimmed();
   }
@@ -33,11 +36,12 @@ SessionRuntimeOptions parseSessionRuntimeOptions(const QString& optionsJson) {
   return options;
 }
 
-QString makeSessionRuntimeOptionsJson(bool enableClipboard, bool mapHomeDrive,
+QString makeSessionRuntimeOptionsJson(bool enableClipboard, bool mapHomeDrive, bool promptEveryTime,
                                       const QString& lastSuccessfulUsername) {
   QJsonObject obj;
   obj.insert("enableClipboard", enableClipboard);
   obj.insert("mapHomeDrive", mapHomeDrive);
+  obj.insert("promptEveryTime", promptEveryTime);
   if (!lastSuccessfulUsername.trimmed().isEmpty()) {
     obj.insert("lastSuccessfulUsername", lastSuccessfulUsername.trimmed());
   }
@@ -45,4 +49,3 @@ QString makeSessionRuntimeOptionsJson(bool enableClipboard, bool mapHomeDrive,
 }
 
 }  // namespace vaultrdp::ui
-

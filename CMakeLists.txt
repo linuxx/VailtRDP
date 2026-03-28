@@ -10,7 +10,7 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
 endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Sql DBus)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Sql)
 find_package(PkgConfig REQUIRED)
 
 pkg_check_modules(FREERDP3 REQUIRED freerdp3)
@@ -41,7 +41,6 @@ add_executable(vaultrdp
   src/protocols/ISession.cpp
   src/protocols/RdpSession.cpp
   src/protocols/RdpSessionUtils.cpp
-  src/system/ScreenLockMonitor.cpp
   src/ui/MainWindowInteraction.cpp
   src/ui/MainWindow.cpp
   src/ui/IconTheme.cpp
@@ -75,7 +74,6 @@ target_link_libraries(vaultrdp
   PRIVATE
     Qt6::Widgets
     Qt6::Sql
-    Qt6::DBus
     ${FREERDP3_LIBRARIES}
     ${FREERDP_CLIENT3_LIBRARIES}
     ${WINPR3_LIBRARIES}

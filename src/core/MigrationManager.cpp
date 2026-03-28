@@ -25,6 +25,9 @@ CREATE TABLE IF NOT EXISTS connections (
   port INTEGER NOT NULL,
   gateway_id TEXT NULL,
   credential_id TEXT NULL,
+  username TEXT NULL,
+  domain TEXT NULL,
+  secret_id TEXT NULL,
   resolution TEXT,
   color_depth INTEGER,
   options_json TEXT,
@@ -33,7 +36,8 @@ CREATE TABLE IF NOT EXISTS connections (
   last_connected_at INTEGER,
   FOREIGN KEY(folder_id) REFERENCES folders(id),
   FOREIGN KEY(gateway_id) REFERENCES gateways(id),
-  FOREIGN KEY(credential_id) REFERENCES credentials(id)
+  FOREIGN KEY(credential_id) REFERENCES credentials(id),
+  FOREIGN KEY(secret_id) REFERENCES secrets(id)
 );
 
 CREATE TABLE IF NOT EXISTS gateways (
@@ -208,6 +212,51 @@ bool MigrationManager::applyInitialSchema(QSqlDatabase& database) const {
   }
   if (!hasCredentialAllowAnyFolder &&
       !ensureCredentialColumn("ALTER TABLE credentials ADD COLUMN allow_any_folder INTEGER NOT NULL DEFAULT 0")) {
+    database.rollback();
+    return false;
+  }
+
+  auto ensureConnectionColumn = [&](const QString& columnSql) -> bool {
+    QSqlQuery alter(database);
+    if (!alter.exec(columnSql)) {
+      qCritical() << "Failed to migrate connections table:" << alter.lastError().text();
+      qCritical() << "Statement:" << columnSql;
+      return false;
+    }
+    return true;
+  };
+
+  QSqlQuery connectionTableInfo(database);
+  if (!connectionTableInfo.exec("PRAGMA table_info(connections)")) {
+    qCritical() << "Failed to inspect connections schema:" << connectionTableInfo.lastError().text();
+    database.rollback();
+    return false;
+  }
+  bool hasConnectionUsername = false;
+  bool hasConnectionDomain = false;
+  bool hasConnectionSecretId = false;
+  while (connectionTableInfo.next()) {
+    const QString name = connectionTableInfo.value(1).toString();
+    if (name == "username") {
+      hasConnectionUsername = true;
+    } else if (name == "domain") {
+      hasConnectionDomain = true;
+    } else if (name == "secret_id") {
+      hasConnectionSecretId = true;
+    }
+  }
+  if (!hasConnectionUsername &&
+      !ensureConnectionColumn("ALTER TABLE connections ADD COLUMN username TEXT NULL")) {
+    database.rollback();
+    return false;
+  }
+  if (!hasConnectionDomain &&
+      !ensureConnectionColumn("ALTER TABLE connections ADD COLUMN domain TEXT NULL")) {
+    database.rollback();
+    return false;
+  }
+  if (!hasConnectionSecretId &&
+      !ensureConnectionColumn("ALTER TABLE connections ADD COLUMN secret_id TEXT NULL")) {
     database.rollback();
     return false;
   }

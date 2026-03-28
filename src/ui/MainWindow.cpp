@@ -1327,7 +1327,7 @@ void MainWindow::reloadFolderTree() {
       folderTreeView_->setExpanded(rootIndex, true);
     }
   }
-  if (treeSearchEdit_ != nullptr && !treeSearchEdit_->text().trimmed().isEmpty()) {
+  if (treeSearchEdit_ != nullptr) {
     applyTreeFilter(treeSearchEdit_->text());
   }
   if (folderTreeView_->currentIndex().isValid() == false) {
@@ -1678,6 +1678,44 @@ void MainWindow::createFolder() {
   }
 
   reloadFolderTree();
+
+  const QModelIndex rootIndex = folderTreeModel_ != nullptr ? folderTreeModel_->index(0, 0) : QModelIndex();
+  if (rootIndex.isValid() && folderTreeView_ != nullptr) {
+    folderTreeView_->setExpanded(rootIndex, true);
+  }
+
+  QModelIndex createdIndex;
+  if (folderTreeModel_ != nullptr) {
+    std::function<void(const QModelIndex&)> findCreated = [&](const QModelIndex& parent) {
+      if (createdIndex.isValid()) {
+        return;
+      }
+      const int rows = folderTreeModel_->rowCount(parent);
+      for (int row = 0; row < rows; ++row) {
+        const QModelIndex index = folderTreeModel_->index(row, 0, parent);
+        if (!index.isValid()) {
+          continue;
+        }
+        if (index.data(kItemTypeRole).toInt() == kItemTypeFolder &&
+            index.data(kItemIdRole).toString() == created->id) {
+          createdIndex = index;
+          return;
+        }
+        findCreated(index);
+      }
+    };
+    findCreated(QModelIndex());
+  }
+
+  if (createdIndex.isValid() && folderTreeView_ != nullptr) {
+    QModelIndex parent = createdIndex.parent();
+    while (parent.isValid()) {
+      folderTreeView_->setExpanded(parent, true);
+      parent = parent.parent();
+    }
+    folderTreeView_->setCurrentIndex(createdIndex);
+    folderTreeView_->scrollTo(createdIndex);
+  }
 }
 
 void MainWindow::createConnection() {
@@ -1694,7 +1732,7 @@ void MainWindow::createConnection() {
   const auto gatewayOptions = gatewayOptionsForFolder(gateways, selectedFolderId(), folders);
   dialog.setCredentialOptions(credentialOptions);
   dialog.setGatewayOptions(gatewayOptions);
-  dialog.setInitialValues(QString(), QString(), 3389, QString(), QString(), QString(), true, true, true,
+  dialog.setInitialValues(QString(), QString(), 3389, QString(), QString(), QString(), true, false, true, true,
                           std::nullopt);
   if (dialog.exec() != QDialog::Accepted) {
     return;
@@ -1706,6 +1744,9 @@ void MainWindow::createConnection() {
   }
 
   std::optional<QString> credentialId;
+  std::optional<QString> connectionUsername;
+  std::optional<QString> connectionDomain;
+  std::optional<QString> connectionSecretId;
   const bool hasCredentialFields = !dialog.username().isEmpty() && !dialog.password().isEmpty();
   QSqlDatabase db = databaseManager_->database();
   if (!db.transaction()) {
@@ -1720,6 +1761,8 @@ void MainWindow::createConnection() {
       return;
     }
     credentialId = dialog.selectedCredentialSetId();
+  } else if (dialog.promptEveryTime()) {
+    credentialId = std::nullopt;
   } else if (dialog.saveCredential() && hasCredentialFields) {
     if (vaultManager_->state() == vaultrdp::core::VaultState::Locked && !ensureVaultUnlocked()) {
       db.rollback();
@@ -1739,21 +1782,16 @@ void MainWindow::createConnection() {
       domain = dialog.domain();
     }
 
-    const auto maybeCredential = credentialRepository_->createCredential(
-        dialog.connectionName() + " Credential", dialog.username(), domain, maybeSecretId.value());
-    if (!maybeCredential.has_value()) {
-      db.rollback();
-      QMessageBox::critical(this, "New Connection", "Failed to create credential record.");
-      return;
-    }
-
-    credentialId = maybeCredential->id;
+    connectionUsername = dialog.username();
+    connectionDomain = domain;
+    connectionSecretId = maybeSecretId.value();
   }
 
   const auto created = connectionRepository_->createConnection(
       dialog.connectionName(), dialog.host(), dialog.port(), selectedFolderId(), credentialId,
+      connectionUsername, connectionDomain, connectionSecretId,
       dialog.selectedGatewayId(),
-      makeSessionRuntimeOptionsJson(dialog.enableClipboard(), dialog.mapHomeDrive()));
+      makeSessionRuntimeOptionsJson(dialog.enableClipboard(), dialog.mapHomeDrive(), dialog.promptEveryTime()));
   if (!created.has_value()) {
     db.rollback();
     QMessageBox::critical(this, "New Connection", "Failed to create connection.");
@@ -1948,7 +1986,8 @@ void MainWindow::editSelectedConnection() {
                                                                                     : QString(),
                           launchInfo.has_value() && launchInfo->password.has_value() ? launchInfo->password.value()
                                                                                       : QString(),
-                          connection.credentialId.has_value(),
+                          connection.credentialId.has_value() || connection.secretId.has_value(),
+                          sessionOptions.promptEveryTime,
                           sessionOptions.enableClipboard, sessionOptions.mapHomeDrive,
                           connection.gatewayId, connection.credentialId);
 
@@ -1962,10 +2001,14 @@ void MainWindow::editSelectedConnection() {
   }
 
   std::optional<QString> credentialId = connection.credentialId;
+  std::optional<QString> connectionUsername = connection.username;
+  std::optional<QString> connectionDomain = connection.domain;
+  std::optional<QString> connectionSecretId = connection.secretId;
   std::optional<vaultrdp::model::Credential> oldCredential;
   if (connection.credentialId.has_value()) {
     oldCredential = credentialRepository_->findCredentialById(connection.credentialId.value());
   }
+  const std::optional<QString> oldConnectionSecretId = connection.secretId;
 
   QSqlDatabase db = databaseManager_->database();
   if (!db.transaction()) {
@@ -1981,8 +2024,19 @@ void MainWindow::editSelectedConnection() {
       return;
     }
     credentialId = dialog.selectedCredentialSetId();
+    connectionUsername = std::nullopt;
+    connectionDomain = std::nullopt;
+    connectionSecretId = std::nullopt;
+  } else if (dialog.promptEveryTime()) {
+    credentialId = std::nullopt;
+    connectionUsername = std::nullopt;
+    connectionDomain = std::nullopt;
+    connectionSecretId = std::nullopt;
   } else if (!dialog.saveCredential()) {
     credentialId = std::nullopt;
+    connectionUsername = std::nullopt;
+    connectionDomain = std::nullopt;
+    connectionSecretId = std::nullopt;
   } else if (hasCredentialFields) {
     if (vaultManager_->state() == vaultrdp::core::VaultState::Locked && !ensureVaultUnlocked()) {
       db.rollback();
@@ -1994,19 +2048,16 @@ void MainWindow::editSelectedConnection() {
     if (!dialog.domain().isEmpty()) {
       domain = dialog.domain();
     }
-    if (oldCredential.has_value()) {
-      if (!secretRepository_->updatePasswordSecret(oldCredential->secretId, dialog.password(), vaultManager_)) {
+    connectionUsername = dialog.username();
+    connectionDomain = domain;
+    credentialId = std::nullopt;
+
+    if (connectionSecretId.has_value()) {
+      if (!secretRepository_->updatePasswordSecret(connectionSecretId.value(), dialog.password(), vaultManager_)) {
         db.rollback();
         QMessageBox::critical(this, "Edit Connection", "Failed to update encrypted password.");
         return;
       }
-      if (!credentialRepository_->updateCredential(oldCredential->id, dialog.connectionName() + " Credential",
-                                                   dialog.username(), domain)) {
-        db.rollback();
-        QMessageBox::critical(this, "Edit Connection", "Failed to update credential record.");
-        return;
-      }
-      credentialId = oldCredential->id;
     } else {
       const auto maybeSecretId = secretRepository_->createPasswordSecret(dialog.password(), vaultManager_);
       if (!maybeSecretId.has_value()) {
@@ -2014,22 +2065,16 @@ void MainWindow::editSelectedConnection() {
         QMessageBox::critical(this, "Edit Connection", "Failed to store encrypted password.");
         return;
       }
-
-      const auto maybeCredential = credentialRepository_->createCredential(
-          dialog.connectionName() + " Credential", dialog.username(), domain, maybeSecretId.value());
-      if (!maybeCredential.has_value()) {
-        db.rollback();
-        QMessageBox::critical(this, "Edit Connection", "Failed to create credential record.");
-        return;
-      }
-      credentialId = maybeCredential->id;
+      connectionSecretId = maybeSecretId.value();
     }
   }
 
   if (!connectionRepository_->updateConnection(connection.id, dialog.connectionName(), dialog.host(),
-                                               dialog.port(), credentialId, dialog.selectedGatewayId(),
+                                               dialog.port(), credentialId, connectionUsername,
+                                               connectionDomain, connectionSecretId, dialog.selectedGatewayId(),
                                                makeSessionRuntimeOptionsJson(dialog.enableClipboard(),
                                                                              dialog.mapHomeDrive(),
+                                                                             dialog.promptEveryTime(),
                                                                              sessionOptions.lastSuccessfulUsername))) {
     db.rollback();
     QMessageBox::warning(this, "Edit Connection", "Failed to update connection.");
@@ -2050,6 +2095,15 @@ void MainWindow::editSelectedConnection() {
         QMessageBox::warning(this, "Edit Connection", "Failed to delete old secret.");
         return;
       }
+    }
+  }
+
+  if (oldConnectionSecretId.has_value() &&
+      (!connectionSecretId.has_value() || connectionSecretId.value() != oldConnectionSecretId.value())) {
+    if (!secretRepository_->deleteSecret(oldConnectionSecretId.value())) {
+      db.rollback();
+      QMessageBox::warning(this, "Edit Connection", "Failed to delete old connection secret.");
+      return;
     }
   }
 
@@ -2606,30 +2660,33 @@ void MainWindow::maybeRunFirstStartupEncryptionWizard() {
         return;
       }
 
-      const auto passphrase = promptPasswordValue(this, "Set vault password:");
-      if (!passphrase.has_value() || passphrase->isEmpty()) {
-        // Back to Enable/Skip prompt.
-        continue;
-      }
+      while (true) {
+        const auto passphrase = promptPasswordValue(this, "Set vault password:");
+        if (!passphrase.has_value() || passphrase->isEmpty()) {
+          // Back to Enable/Skip prompt.
+          break;
+        }
 
-      const auto confirm = promptPasswordValue(this, "Confirm vault password:");
-      if (!confirm.has_value() || confirm->isEmpty()) {
-        // Back to Enable/Skip prompt.
-        continue;
-      }
+        const auto confirm = promptPasswordValue(this, "Confirm vault password:");
+        if (!confirm.has_value() || confirm->isEmpty()) {
+          // Back to Enable/Skip prompt.
+          break;
+        }
 
-      if (passphrase.value() != confirm.value()) {
-        QMessageBox::warning(this, "Enable Encryption", "Passwords do not match.");
-        // Back to Enable/Skip prompt.
-        continue;
-      }
+        if (passphrase.value() != confirm.value()) {
+          QMessageBox::warning(this, "Enable Encryption", "Passwords do not match.");
+          continue;
+        }
 
-      if (!vaultManager_->enable(passphrase.value())) {
-        QMessageBox::warning(this, "Enable Encryption",
-                             "Failed to enable encryption. Password must satisfy policy.");
+        if (!vaultManager_->enable(passphrase.value())) {
+          QMessageBox::warning(this, "Enable Encryption",
+                               "Failed to enable encryption. Password must satisfy policy.");
+          continue;
+        }
+
+        updateVaultStatus();
+        return;
       }
-      updateVaultStatus();
-      return;
     }
   });
 }
@@ -2803,7 +2860,8 @@ void MainWindow::addSessionTab(const vaultrdp::core::repository::ConnectionLaunc
                     parseSessionRuntimeOptions(infoIt->connection.optionsJson);
                 options.lastSuccessfulUsername = infoIt->username.value().trimmed();
                 const QString newOptionsJson = makeSessionRuntimeOptionsJson(
-                    options.enableClipboard, options.mapHomeDrive, options.lastSuccessfulUsername);
+                    options.enableClipboard, options.mapHomeDrive, options.promptEveryTime,
+                    options.lastSuccessfulUsername);
                 if (newOptionsJson != infoIt->connection.optionsJson &&
                     connectionRepository_->updateConnectionOptionsJson(connectionId, newOptionsJson)) {
                   infoIt->connection.optionsJson = newOptionsJson;

@@ -177,7 +177,8 @@ void MainWindow::connectSelectedConnection() {
 
   resetSessionControllerStateForManualConnect(selectedId.value());
 
-  const bool needsPrimaryCredentialPrompt = !launchInfo.password.has_value() || launchInfo.password->isEmpty();
+  const bool needsPrimaryCredentialPrompt =
+      sessionOptions.promptEveryTime || !launchInfo.password.has_value() || launchInfo.password->isEmpty();
   const bool needsGatewayCredentialPrompt =
       launchInfo.gatewayHost.has_value() &&
       (launchInfo.gatewayPromptEachTime || !launchInfo.gatewayPassword.has_value() ||
