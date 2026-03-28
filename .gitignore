@@ -21,8 +21,8 @@ Makefile
 *~
 
 # Runtime artifacts
-core
-core.*
+/core
+/core.*
 *.stackdump
 
 # Local runtime/db/log files (if created in-tree)
@@ -31,4 +31,3 @@ core.*
 *.sqlite
 *.sqlite3
 *.log
-
