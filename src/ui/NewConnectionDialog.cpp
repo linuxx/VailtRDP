@@ -5,7 +5,6 @@
 #include <QDialogButtonBox>
 #include <QFrame>
 #include <QFormLayout>
-#include <QLabel>
 #include <QLineEdit>
 #include <QSpinBox>
 #include <QTabWidget>
@@ -20,14 +19,9 @@ NewConnectionDialog::NewConnectionDialog(QWidget* parent)
       portSpin_(new QSpinBox(this)),
       credentialSourceCombo_(new QComboBox(this)),
       credentialSetCombo_(new QComboBox(this)),
-      credentialSetLabel_(nullptr),
       usernameEdit_(new QLineEdit(this)),
-      usernameLabel_(nullptr),
       domainEdit_(new QLineEdit(this)),
-      domainLabel_(nullptr),
       passwordEdit_(new QLineEdit(this)),
-      passwordLabel_(nullptr),
-      saveCredentialCheck_(new QCheckBox("Save credential in vault", this)),
       enableClipboardCheck_(new QCheckBox("Enable clipboard", this)),
       mapHomeDriveCheck_(new QCheckBox("Map home drive", this)),
       gatewayCombo_(new QComboBox(this)) {
@@ -45,7 +39,6 @@ NewConnectionDialog::NewConnectionDialog(QWidget* parent)
   credentialSourceCombo_->addItem("Prompt Every Time",
                                   static_cast<int>(ConnectionCredentialSource::PromptEveryTime));
   credentialSetCombo_->addItem("Select saved credential...", QVariant());
-  saveCredentialCheck_->setChecked(true);
   enableClipboardCheck_->setChecked(true);
   mapHomeDriveCheck_->setChecked(true);
 
@@ -67,11 +60,6 @@ NewConnectionDialog::NewConnectionDialog(QWidget* parent)
   form->addRow("Username", usernameEdit_);
   form->addRow("Domain", domainEdit_);
   form->addRow("Password", passwordEdit_);
-  credentialSetLabel_ = qobject_cast<QLabel*>(form->labelForField(credentialSetCombo_));
-  usernameLabel_ = qobject_cast<QLabel*>(form->labelForField(usernameEdit_));
-  domainLabel_ = qobject_cast<QLabel*>(form->labelForField(domainEdit_));
-  passwordLabel_ = qobject_cast<QLabel*>(form->labelForField(passwordEdit_));
-  form->addRow("", saveCredentialCheck_);
   tabs_->addTab(generalPage, "General");
 
   connect(credentialSourceCombo_, &QComboBox::currentIndexChanged, this, [this]() { updateCredentialUi(); });
@@ -123,9 +111,8 @@ void NewConnectionDialog::setCredentialOptions(const std::vector<std::pair<QStri
 
 void NewConnectionDialog::setInitialValues(const QString& connectionName, const QString& host, int port,
                                            const QString& username, const QString& domain,
-                                           const QString& password, bool saveCredential,
-                                           bool promptEveryTime,
-                                           bool enableClipboard, bool mapHomeDrive,
+                                           const QString& password, bool promptEveryTime, bool enableClipboard,
+                                           bool mapHomeDrive,
                                            const std::optional<QString>& selectedGatewayId,
                                            const std::optional<QString>& selectedCredentialId) {
   connectionNameEdit_->setText(connectionName);
@@ -136,7 +123,6 @@ void NewConnectionDialog::setInitialValues(const QString& connectionName, const 
   usernameEdit_->setText(username);
   domainEdit_->setText(domain);
   passwordEdit_->setText(password);
-  saveCredentialCheck_->setChecked(saveCredential);
   enableClipboardCheck_->setChecked(enableClipboard);
   mapHomeDriveCheck_->setChecked(mapHomeDrive);
   if (selectedGatewayId.has_value() && !selectedGatewayId->trimmed().isEmpty()) {
@@ -196,10 +182,6 @@ QString NewConnectionDialog::password() const {
   return passwordEdit_->text();
 }
 
-bool NewConnectionDialog::saveCredential() const {
-  return credentialSource() == ConnectionCredentialSource::EnterCredentials && saveCredentialCheck_->isChecked();
-}
-
 ConnectionCredentialSource NewConnectionDialog::credentialSource() const {
   return static_cast<ConnectionCredentialSource>(credentialSourceCombo_->currentData().toInt());
 }
@@ -251,20 +233,7 @@ void NewConnectionDialog::updateCredentialUi() {
   const bool useSaved = credentialSource() == ConnectionCredentialSource::SavedCredentialSet;
   const bool promptEveryTimeMode = credentialSource() == ConnectionCredentialSource::PromptEveryTime;
   credentialSetCombo_->setEnabled(useSaved);
-  if (credentialSetLabel_ != nullptr) {
-    credentialSetLabel_->setEnabled(useSaved);
-  }
   usernameEdit_->setEnabled(!useSaved && !promptEveryTimeMode);
-  if (usernameLabel_ != nullptr) {
-    usernameLabel_->setEnabled(!useSaved && !promptEveryTimeMode);
-  }
   domainEdit_->setEnabled(!useSaved && !promptEveryTimeMode);
-  if (domainLabel_ != nullptr) {
-    domainLabel_->setEnabled(!useSaved && !promptEveryTimeMode);
-  }
   passwordEdit_->setEnabled(!useSaved && !promptEveryTimeMode);
-  if (passwordLabel_ != nullptr) {
-    passwordLabel_->setEnabled(!useSaved && !promptEveryTimeMode);
-  }
-  saveCredentialCheck_->setEnabled(!useSaved && !promptEveryTimeMode);
 }

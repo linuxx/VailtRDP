@@ -1731,7 +1731,7 @@ void MainWindow::createConnection() {
   const auto gatewayOptions = gatewayOptionsForFolder(gateways, selectedFolderId(), folders);
   dialog.setCredentialOptions(credentialOptions);
   dialog.setGatewayOptions(gatewayOptions);
-  dialog.setInitialValues(QString(), QString(), 3389, QString(), QString(), QString(), true, false, true, true,
+  dialog.setInitialValues(QString(), QString(), 3389, QString(), QString(), QString(), false, true, true,
                           std::nullopt);
   if (dialog.exec() != QDialog::Accepted) {
     return;
@@ -1762,7 +1762,7 @@ void MainWindow::createConnection() {
     credentialId = dialog.selectedCredentialSetId();
   } else if (dialog.promptEveryTime()) {
     credentialId = std::nullopt;
-  } else if (dialog.saveCredential() && hasCredentialFields) {
+  } else if (hasCredentialFields) {
     if (vaultManager_->state() == vaultrdp::core::VaultState::Locked && !ensureVaultUnlocked()) {
       db.rollback();
       QMessageBox::information(this, "Vault", "Vault must be unlocked to save credentials.");
@@ -1985,7 +1985,6 @@ void MainWindow::editSelectedConnection() {
                                                                                     : QString(),
                           launchInfo.has_value() && launchInfo->password.has_value() ? launchInfo->password.value()
                                                                                       : QString(),
-                          connection.credentialId.has_value() || connection.secretId.has_value(),
                           sessionOptions.promptEveryTime,
                           sessionOptions.enableClipboard, sessionOptions.mapHomeDrive,
                           connection.gatewayId, connection.credentialId);
@@ -2027,11 +2026,6 @@ void MainWindow::editSelectedConnection() {
     connectionDomain = std::nullopt;
     connectionSecretId = std::nullopt;
   } else if (dialog.promptEveryTime()) {
-    credentialId = std::nullopt;
-    connectionUsername = std::nullopt;
-    connectionDomain = std::nullopt;
-    connectionSecretId = std::nullopt;
-  } else if (!dialog.saveCredential()) {
     credentialId = std::nullopt;
     connectionUsername = std::nullopt;
     connectionDomain = std::nullopt;
