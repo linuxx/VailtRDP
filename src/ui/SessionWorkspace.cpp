@@ -167,14 +167,6 @@ void SessionWorkspace::ensureWelcomeTab() {
     return;
   }
 
-  if (sessionTabWidget_->count() > 0) {
-    for (int i = 0; i < sessionTabWidget_->count(); ++i) {
-      if (sessionTabWidget_->widget(i) != welcomeTab_) {
-        return;
-      }
-    }
-  }
-
   if (welcomeTab_ == nullptr) {
     return;
   }
