@@ -22,7 +22,7 @@ QChar glyphForIcon(AppIcon icon) {
     case AppIcon::Brand:
       return QChar(0xf3ed);  // fa-shield-halved
     case AppIcon::Vault:
-      return QChar(0xf07b);  // fa-folder
+      return QChar(0xf1c0);  // fa-database
     case AppIcon::Folder:
     case AppIcon::NewFolder:
       return QChar(0xf07b);  // fa-folder
