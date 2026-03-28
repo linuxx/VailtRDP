@@ -55,6 +55,7 @@ add_executable(vaultrdp
   src/ui/RdpRenderWidget.cpp
   src/ui/SessionRuntimeOptions.cpp
   src/ui/SessionController.cpp
+  src/ui/SessionWorkspace.cpp
   src/ui/SessionTabContent.cpp
 )
 

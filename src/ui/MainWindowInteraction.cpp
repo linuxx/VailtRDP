@@ -26,7 +26,7 @@
 #include "core/repository/SecretRepository.hpp"
 #include "protocols/RdpSession.hpp"
 #include "ui/IconTheme.hpp"
-#include "ui/SessionController.hpp"
+#include "ui/SessionWorkspace.hpp"
 #include "ui/SessionTabContent.hpp"
 #include "ui/SessionRuntimeOptions.hpp"
 #include "ui/TreeItemRoles.hpp"
@@ -136,7 +136,7 @@ void MainWindow::connectSelectedConnection() {
   }
 
   if (hasActiveSessionForConnection(selectedId.value())) {
-    QWidget* tab = sessionTabsByConnection_.value(selectedId.value());
+    QWidget* tab = sessionWorkspace_->tabForConnection(selectedId.value());
     const int existingIndex = sessionTabWidget_->indexOf(tab);
     if (existingIndex >= 0) {
       sessionTabWidget_->setCurrentIndex(existingIndex);
@@ -249,22 +249,19 @@ void MainWindow::disconnectSelectedConnection() {
 }
 
 bool MainWindow::hasActiveSessionForConnection(const QString& connectionId) const {
-  QWidget* tab = sessionTabsByConnection_.value(connectionId, nullptr);
-  if (tab == nullptr || sessionTabWidget_ == nullptr) {
-    return false;
-  }
-  return sessionTabWidget_->indexOf(tab) >= 0;
+  return sessionWorkspace_ != nullptr && sessionWorkspace_->hasActiveSessionForConnection(connectionId);
 }
 
 bool MainWindow::closeSessionForConnection(const QString& connectionId) {
-  QWidget* tab = sessionTabsByConnection_.value(connectionId, nullptr);
-  if (tab == nullptr || sessionTabWidget_ == nullptr) {
-    sessionTabsByConnection_.remove(connectionId);
+  if (sessionWorkspace_ == nullptr || sessionTabWidget_ == nullptr) {
+    return false;
+  }
+  QWidget* tab = sessionWorkspace_->tabForConnection(connectionId);
+  if (tab == nullptr) {
     return false;
   }
   const int index = sessionTabWidget_->indexOf(tab);
   if (index < 0) {
-    sessionTabsByConnection_.remove(connectionId);
     return false;
   }
   handleTabCloseRequested(index);
@@ -294,7 +291,7 @@ void MainWindow::logoffCurrentSession() {
   if (!connectionId.has_value()) {
     return;
   }
-  auto* session = sessionsByConnection_.value(connectionId.value(), nullptr);
+  auto* session = sessionWorkspace_->sessionForConnection(connectionId.value());
   if (session == nullptr || session->state() != vaultrdp::protocols::SessionState::Connected) {
     return;
   }
@@ -331,7 +328,7 @@ void MainWindow::logoffCurrentSession() {
   session->sendKeyInput(Qt::Key_Meta, 0, false);
 
   QTimer::singleShot(120, this, [this, connectionId, sendLetter, sendTap, releaseModifiers]() {
-    auto* active = sessionsByConnection_.value(connectionId.value(), nullptr);
+    auto* active = sessionWorkspace_->sessionForConnection(connectionId.value());
     if (active == nullptr || active->state() != vaultrdp::protocols::SessionState::Connected) {
       return;
     }
@@ -385,7 +382,7 @@ void MainWindow::enterSessionFullscreenForConnection(const QString& connectionId
     windowStateBeforeSessionFullscreen_ = windowState();
   }
   sessionFullscreenConnectionId_ = connectionId;
-  QWidget* tab = sessionTabsByConnection_.value(connectionId, nullptr);
+  QWidget* tab = sessionWorkspace_->tabForConnection(connectionId);
   if (tab != nullptr && sessionTabWidget_ != nullptr) {
     const int index = sessionTabWidget_->indexOf(tab);
     if (index >= 0) {
@@ -445,22 +442,9 @@ void MainWindow::handleTabCloseRequested(int index) {
       sessionFullscreenConnectionId_ == connectionId;
   if (!connectionId.isEmpty()) {
     pendingFullscreenByConnection_.remove(connectionId);
-    sessionGenerationByConnection_[connectionId] = ++sessionGenerationCounter_;
-    qInfo().noquote() << "[session conn=" + connectionId + "] close requested generation advanced to"
-                      << sessionGenerationByConnection_.value(connectionId);
-    if (sessionsByConnection_.contains(connectionId)) {
-      auto* session = sessionsByConnection_.take(connectionId);
-      if (session != nullptr) {
-        session->disconnectSession();
-        session->deleteLater();
-      }
-    }
-    clearSessionTrackingForConnection(connectionId);
+    sessionWorkspace_->closeSessionAt(index);
   }
 
-  sessionTabWidget_->removeTab(index);
-  tab->deleteLater();
-  ensureWelcomeTab();
   if (closingFullscreenSession) {
     exitSessionFullscreen();
   } else if (isSessionFullscreenActive()) {
@@ -472,13 +456,6 @@ void MainWindow::handleTabCloseRequested(int index) {
     }
   }
   updateCreateActionAvailability();
-}
-
-void MainWindow::clearSessionTrackingForConnection(const QString& connectionId) {
-  sessionController_->onSessionClosed(connectionId);
-  sessionClipboardEnabledByConnection_.remove(connectionId);
-  launchInfoByConnection_.remove(connectionId);
-  sessionTabsByConnection_.remove(connectionId);
 }
 
 void MainWindow::showTreeContextMenu(const QPoint& pos) {
@@ -502,7 +479,7 @@ void MainWindow::showTreeContextMenu(const QPoint& pos) {
     disconnectAction->setIcon(themedIcon(vaultrdp::ui::AppIcon::Disconnect, this));
     disconnectAction->setEnabled(active);
     auto* logoffAction = menu.addAction("Logoff", this, [this, connectionId]() {
-      QWidget* tab = sessionTabsByConnection_.value(connectionId, nullptr);
+      QWidget* tab = sessionWorkspace_->tabForConnection(connectionId);
       if (tab != nullptr && sessionTabWidget_ != nullptr) {
         const int index = sessionTabWidget_->indexOf(tab);
         if (index >= 0) {
@@ -634,7 +611,7 @@ void MainWindow::deleteSelectedItem() {
   const QString itemId = index.data(kItemIdRole).toString();
 
   if (itemType == kItemTypeConnection) {
-    if (sessionTabsByConnection_.contains(itemId)) {
+    if (sessionWorkspace_->hasActiveSessionForConnection(itemId)) {
       QMessageBox::information(this, "Delete Connection",
                                "Disconnect the active session before deleting this connection.");
       return;

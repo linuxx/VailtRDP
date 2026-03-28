@@ -49,6 +49,7 @@ enum class SessionState : int;
 namespace vaultrdp::ui {
 class SessionTabContent;
 class SessionController;
+class SessionWorkspace;
 }
 
 class MainWindow : public QMainWindow {
@@ -148,7 +149,6 @@ class MainWindow : public QMainWindow {
   void ensureWelcomeTab();
   std::optional<QString> currentSessionConnectionId() const;
   void syncClipboardToFocusedSession();
-  void clearSessionTrackingForConnection(const QString& connectionId);
   bool isSessionFullscreenActive() const;
   bool isSessionGenerationCurrent(const QString& connectionId, quint64 generation,
                                   const char* eventName) const;
@@ -201,13 +201,7 @@ class MainWindow : public QMainWindow {
   QList<int> splitterSizesBeforeSessionFullscreen_;
   Qt::WindowStates windowStateBeforeSessionFullscreen_;
   QSet<QString> pendingFullscreenByConnection_;
-  QHash<QString, QWidget*> sessionTabsByConnection_;
-  QHash<QString, vaultrdp::protocols::RdpSession*> sessionsByConnection_;
-  QHash<QString, bool> sessionClipboardEnabledByConnection_;
-  QHash<QString, vaultrdp::core::repository::ConnectionLaunchInfo> launchInfoByConnection_;
-  std::unique_ptr<vaultrdp::ui::SessionController> sessionController_;
-  QHash<QString, quint64> sessionGenerationByConnection_;
-  quint64 sessionGenerationCounter_;
+  std::unique_ptr<vaultrdp::ui::SessionWorkspace> sessionWorkspace_;
   bool suppressClipboardEvent_;
   qint64 ignoreClipboardEventsUntilMs_;
   QString lastRemoteClipboardText_;
