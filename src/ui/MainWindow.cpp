@@ -5,6 +5,7 @@
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QClipboard>
+#include <QCheckBox>
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -92,6 +93,8 @@ using vaultrdp::ui::themedIcon;
 using vaultrdp::ui::makeSessionRuntimeOptionsJson;
 using vaultrdp::ui::parseSessionRuntimeOptions;
 using vaultrdp::ui::SessionRuntimeOptions;
+
+constexpr auto kShowWelcomeAtStartupKey = "ui/show_welcome_at_startup";
 
 std::optional<QString> promptPasswordValue(QWidget* parent, const QString& promptText) {
   QDialog dialog(parent);
@@ -458,7 +461,7 @@ void MainWindow::setupUi() {
   sessionTabWidget_->setDocumentMode(true);
   sessionPaneLayout->addWidget(sessionTabWidget_);
 
-  welcomeTab_ = new QWidget(sessionTabWidget_);
+  welcomeTab_ = new QWidget();
   auto* emptyLayout = new QVBoxLayout(welcomeTab_);
   emptyLayout->setContentsMargins(32, 36, 32, 36);
   emptyLayout->setSpacing(16);
@@ -471,17 +474,26 @@ void MainWindow::setupUi() {
   centerLayout->setContentsMargins(0, 0, 0, 0);
   centerLayout->setSpacing(14);
 
-  auto* titleLabel = new QLabel("No Active Sessions", centerBlock);
+  auto* titleLabel = new QLabel("Getting Started", centerBlock);
   titleLabel->setObjectName("welcomeTitleLabel");
   titleLabel->setAlignment(Qt::AlignHCenter);
   centerLayout->addWidget(titleLabel);
 
-  auto* subtitleLabel =
-      new QLabel("No active sessions. Select one of the options below to add a new item.", centerBlock);
+  auto* subtitleLabel = new QLabel(
+      "Create your first folder, save shared credentials or gateways, and open a connection when you are ready.",
+      centerBlock);
   subtitleLabel->setObjectName("welcomeSubtitleLabel");
   subtitleLabel->setAlignment(Qt::AlignHCenter);
   subtitleLabel->setWordWrap(true);
   centerLayout->addWidget(subtitleLabel);
+
+  auto* stepsLabel = new QLabel(
+      "Suggested flow: create a root folder, add a connection, and connect from the tree on the left.",
+      centerBlock);
+  stepsLabel->setObjectName("welcomeBodyLabel");
+  stepsLabel->setAlignment(Qt::AlignHCenter);
+  stepsLabel->setWordWrap(true);
+  centerLayout->addWidget(stepsLabel);
 
   auto* cardsRow = new QHBoxLayout();
   cardsRow->setSpacing(16);
@@ -521,10 +533,27 @@ void MainWindow::setupUi() {
   cardsRow->addStretch();
   centerLayout->addLayout(cardsRow);
 
+  auto* startupToggle = new QCheckBox("Show this at startup", centerBlock);
+  startupToggle->setObjectName("welcomeStartupToggle");
+  {
+    QSettings settings;
+    startupToggle->setChecked(settings.value(kShowWelcomeAtStartupKey, true).toBool());
+  }
+  connect(startupToggle, &QCheckBox::toggled, this, [](bool checked) {
+    QSettings settings;
+    settings.setValue(kShowWelcomeAtStartupKey, checked);
+  });
+  centerLayout->addWidget(startupToggle, 0, Qt::AlignHCenter);
+
   emptyLayout->addWidget(centerBlock, 0, Qt::AlignHCenter);
   emptyLayout->addStretch();
 
-  sessionTabWidget_->addTab(welcomeTab_, "Welcome");
+  {
+    QSettings settings;
+    if (settings.value(kShowWelcomeAtStartupKey, true).toBool()) {
+      sessionTabWidget_->addTab(welcomeTab_, "Welcome");
+    }
+  }
   sessionWorkspace_ = std::make_unique<vaultrdp::ui::SessionWorkspace>(sessionTabWidget_, welcomeTab_, this);
   connect(sessionTabWidget_, &QTabWidget::tabCloseRequested, this, &MainWindow::handleTabCloseRequested);
   connect(sessionTabWidget_, &QTabWidget::currentChanged, this, [this](int) {
@@ -1080,6 +1109,8 @@ void MainWindow::setupMenuBar() {
   renameAction->setIcon(themedIcon(vaultrdp::ui::AppIcon::Rename, this));
 
   auto* viewMenu = menuBar()->addMenu("&View");
+  viewMenu->addAction("Welcome", this, &MainWindow::ensureWelcomeTab);
+  viewMenu->addSeparator();
   viewMenu->addAction("Expand All", folderTreeView_, &QTreeView::expandAll);
   viewMenu->addAction("Collapse All", folderTreeView_, &QTreeView::collapseAll);
 
@@ -1488,6 +1519,8 @@ void MainWindow::applyTheme(ThemeMode mode) {
         "QWidget#welcomeCenterBlock{background:transparent;}"
         "QLabel#welcomeTitleLabel{font-size:48px;font-weight:700;color:#e3e8f0;}"
         "QLabel#welcomeSubtitleLabel{font-size:24px;color:#aeb6c3;}"
+        "QLabel#welcomeBodyLabel{font-size:18px;color:#c4ccd8;}"
+        "QCheckBox#welcomeStartupToggle{font-size:15px;color:#d7deea;spacing:8px;padding-top:8px;}"
         "QStatusBar{background:#1f2430;color:#aeb6c3;border-top:1px solid #303846;}");
   } else {
       app->setStyleSheet(
@@ -1517,6 +1550,8 @@ void MainWindow::applyTheme(ThemeMode mode) {
         "QWidget#welcomeCenterBlock{background:transparent;}"
         "QLabel#welcomeTitleLabel{font-size:48px;font-weight:700;color:#2b3440;}"
         "QLabel#welcomeSubtitleLabel{font-size:24px;color:#677283;}"
+        "QLabel#welcomeBodyLabel{font-size:18px;color:#4f5d71;}"
+        "QCheckBox#welcomeStartupToggle{font-size:15px;color:#415064;spacing:8px;padding-top:8px;}"
         "QStatusBar{background:#f0f2f6;color:#5f6979;border-top:1px solid #d9dde6;}");
   }
 

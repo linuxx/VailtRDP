@@ -432,7 +432,12 @@ void MainWindow::handleTabCloseRequested(int index) {
   }
 
   QWidget* tab = sessionTabWidget_->widget(index);
-  if (tab == nullptr || tab == welcomeTab_) {
+  if (tab == nullptr) {
+    return;
+  }
+  if (tab == welcomeTab_) {
+    sessionTabWidget_->removeTab(index);
+    updateCreateActionAvailability();
     return;
   }
 

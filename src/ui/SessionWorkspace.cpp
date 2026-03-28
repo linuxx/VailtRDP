@@ -96,9 +96,8 @@ std::optional<SessionHandle> SessionWorkspace::createSessionTab(
             session->sendWheel(orientation, delta, x, y);
           });
   QObject::connect(sessionWidget, &vaultrdp::ui::SessionTabContent::viewportResizeRequested, session,
-          [](int width, int height) {
-            Q_UNUSED(width);
-            Q_UNUSED(height);
+          [session](int width, int height) {
+            session->resizeSession(width, height);
           });
 
   return SessionHandle{connection.id, sessionGeneration, sessionWidget, session};
@@ -248,7 +247,6 @@ std::optional<QString> SessionWorkspace::closeSessionAt(int index) {
 
   sessionTabWidget_->removeTab(index);
   tab->deleteLater();
-  ensureWelcomeTab();
   return connectionId.isEmpty() ? std::nullopt : std::optional<QString>(connectionId);
 }
 
