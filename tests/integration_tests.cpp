@@ -188,6 +188,165 @@ bool runVaultAndRepoIntegration() {
   return true;
 }
 
+bool runConnectionCredentialPolicyIntegration() {
+  QTemporaryDir tempDir;
+  if (!check(tempDir.isValid(), "temporary test directory (credential policy) created")) {
+    return false;
+  }
+
+  const QString dbPath = tempDir.filePath("credential-policy.db");
+  DatabaseManager dbm(dbPath);
+  if (!check(dbm.initialize(), "database initialized (credential policy)")) {
+    return false;
+  }
+
+  vaultrdp::core::VaultManager vault(&dbm);
+  vaultrdp::core::repository::SecretRepository secretRepo(&dbm);
+  vaultrdp::core::repository::CredentialRepository credentialRepo(&dbm);
+  vaultrdp::core::repository::ConnectionRepository connectionRepo(&dbm);
+
+  const auto maybeSharedSecretId = secretRepo.createPasswordSecret("SharedPass1", &vault);
+  if (!check(maybeSharedSecretId.has_value(), "shared credential secret created")) {
+    return false;
+  }
+  const auto maybeSharedCredential = credentialRepo.createCredential(
+      "Shared Credential", "shared-user", std::optional<QString>(QStringLiteral("SHARED")),
+      maybeSharedSecretId.value());
+  if (!check(maybeSharedCredential.has_value(), "shared credential created")) {
+    return false;
+  }
+
+  const auto sharedConnection = connectionRepo.createConnection(
+      "Shared Connection", "shared.local", 3389, std::nullopt, maybeSharedCredential->id, std::nullopt, std::nullopt,
+      std::nullopt, std::nullopt, "{\"promptEveryTime\":false}");
+  if (!check(sharedConnection.has_value(), "shared-credential connection created")) {
+    return false;
+  }
+
+  const auto sharedLaunch = connectionRepo.resolveLaunchInfo(sharedConnection->id, &vault);
+  if (!check(sharedLaunch.has_value(), "shared-credential launch info resolved")) {
+    return false;
+  }
+  if (!check(sharedLaunch->username.has_value() && sharedLaunch->username.value() == "shared-user",
+             "shared credential username resolved")) {
+    return false;
+  }
+  if (!check(sharedLaunch->domain.has_value() && sharedLaunch->domain.value() == "SHARED",
+             "shared credential domain resolved")) {
+    return false;
+  }
+  if (!check(sharedLaunch->password.has_value() && sharedLaunch->password.value() == "SharedPass1",
+             "shared credential password resolved")) {
+    return false;
+  }
+  if (!check(!sharedLaunch->promptEveryTime, "shared credential policy does not prompt every time")) {
+    return false;
+  }
+
+  const auto maybeLocalSecretId = secretRepo.createPasswordSecret("LocalPass1", &vault);
+  if (!check(maybeLocalSecretId.has_value(), "connection-owned secret created")) {
+    return false;
+  }
+  const auto localConnection = connectionRepo.createConnection(
+      "Local Connection", "local.local", 3389, std::nullopt, std::nullopt,
+      std::optional<QString>(QStringLiteral("local-user")), std::optional<QString>(QStringLiteral("LOCAL")),
+      maybeLocalSecretId, std::nullopt, "{\"promptEveryTime\":false}");
+  if (!check(localConnection.has_value(), "connection-owned credential connection created")) {
+    return false;
+  }
+
+  const auto localLaunch = connectionRepo.resolveLaunchInfo(localConnection->id, &vault);
+  if (!check(localLaunch.has_value(), "connection-owned launch info resolved")) {
+    return false;
+  }
+  if (!check(localLaunch->username.has_value() && localLaunch->username.value() == "local-user",
+             "connection-owned username resolved")) {
+    return false;
+  }
+  if (!check(localLaunch->domain.has_value() && localLaunch->domain.value() == "LOCAL",
+             "connection-owned domain resolved")) {
+    return false;
+  }
+  if (!check(localLaunch->password.has_value() && localLaunch->password.value() == "LocalPass1",
+             "connection-owned password resolved")) {
+    return false;
+  }
+  if (!check(!localLaunch->promptEveryTime, "connection-owned credential policy does not prompt every time")) {
+    return false;
+  }
+
+  const auto maybeOverrideSecretId = secretRepo.createPasswordSecret("OverridePass1", &vault);
+  if (!check(maybeOverrideSecretId.has_value(), "override secret created")) {
+    return false;
+  }
+  const auto overrideConnection = connectionRepo.createConnection(
+      "Override Connection", "override.local", 3389, std::nullopt, maybeSharedCredential->id,
+      std::optional<QString>(QStringLiteral("override-user")), std::optional<QString>(QStringLiteral("OVERRIDE")),
+      maybeOverrideSecretId, std::nullopt, "{\"promptEveryTime\":false}");
+  if (!check(overrideConnection.has_value(), "override connection created")) {
+    return false;
+  }
+
+  const auto overrideLaunch = connectionRepo.resolveLaunchInfo(overrideConnection->id, &vault);
+  if (!check(overrideLaunch.has_value(), "override launch info resolved")) {
+    return false;
+  }
+  if (!check(overrideLaunch->username.has_value() && overrideLaunch->username.value() == "override-user",
+             "connection-owned username overrides shared credential")) {
+    return false;
+  }
+  if (!check(overrideLaunch->domain.has_value() && overrideLaunch->domain.value() == "OVERRIDE",
+             "connection-owned domain overrides shared credential")) {
+    return false;
+  }
+  if (!check(overrideLaunch->password.has_value() && overrideLaunch->password.value() == "OverridePass1",
+             "connection-owned password overrides shared credential")) {
+    return false;
+  }
+
+  const auto promptConnection = connectionRepo.createConnection(
+      "Prompt Connection", "prompt.local", 3389, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+      std::nullopt, std::nullopt, "{\"promptEveryTime\":true}");
+  if (!check(promptConnection.has_value(), "prompt-every-time connection created")) {
+    return false;
+  }
+
+  const auto promptLaunch = connectionRepo.resolveLaunchInfo(promptConnection->id, &vault);
+  if (!check(promptLaunch.has_value(), "prompt-every-time launch info resolved")) {
+    return false;
+  }
+  if (!check(promptLaunch->promptEveryTime, "prompt-every-time policy is surfaced in launch info")) {
+    return false;
+  }
+  if (!check(!promptLaunch->username.has_value() && !promptLaunch->password.has_value(),
+             "prompt-every-time connection has no stored primary credentials")) {
+    return false;
+  }
+
+  QSqlDatabase db = dbm.database();
+  QSqlQuery secretExists(db);
+  secretExists.prepare("SELECT COUNT(*) FROM secrets WHERE id = ?");
+  secretExists.addBindValue(maybeLocalSecretId.value());
+  if (!check(secretExists.exec() && secretExists.next() && secretExists.value(0).toInt() == 1,
+             "connection-owned secret exists before delete")) {
+    return false;
+  }
+
+  if (!check(connectionRepo.deleteConnection(localConnection->id), "connection-owned credential connection deleted")) {
+    return false;
+  }
+
+  QSqlQuery secretRemoved(db);
+  secretRemoved.prepare("SELECT COUNT(*) FROM secrets WHERE id = ?");
+  secretRemoved.addBindValue(maybeLocalSecretId.value());
+  if (!check(secretRemoved.exec() && secretRemoved.next() && secretRemoved.value(0).toInt() == 0,
+             "deleting connection removes connection-owned secret")) {
+    return false;
+  }
+
+  return true;
+}
+
 bool runSessionLifecycleSmoke() {
   auto* session = new vaultrdp::protocols::RdpSession(
       "127.0.0.1", 1, std::nullopt, std::nullopt, std::nullopt, std::nullopt, 443, std::nullopt,
@@ -429,6 +588,7 @@ int main(int argc, char** argv) {
 
   bool ok = true;
   ok = runVaultAndRepoIntegration() && ok;
+  ok = runConnectionCredentialPolicyIntegration() && ok;
   ok = runRepositoryMoveAndGatewayScopeIntegration() && ok;
   ok = runSessionLifecycleSmoke() && ok;
   ok = runSessionTeardownStress() && ok;

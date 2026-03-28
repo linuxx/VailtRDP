@@ -2,6 +2,9 @@
 
 #include <QDateTime>
 #include <QDebug>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -14,6 +17,26 @@
 #include "core/repository/SqlHelpers.hpp"
 
 namespace vaultrdp::core::repository {
+
+namespace {
+
+bool connectionPromptsEveryTime(const QString& optionsJson) {
+  const QByteArray json = optionsJson.toUtf8();
+  if (json.trimmed().isEmpty()) {
+    return false;
+  }
+
+  QJsonParseError error;
+  const QJsonDocument document = QJsonDocument::fromJson(json, &error);
+  if (error.error != QJsonParseError::NoError || !document.isObject()) {
+    return false;
+  }
+
+  const QJsonValue promptValue = document.object().value("promptEveryTime");
+  return promptValue.isBool() && promptValue.toBool();
+}
+
+}  // namespace
 
 ConnectionRepository::ConnectionRepository(DatabaseManager* databaseManager) : databaseManager_(databaseManager) {}
 
@@ -264,6 +287,7 @@ std::optional<ConnectionLaunchInfo> ConnectionRepository::resolveLaunchInfo(
 
   ConnectionLaunchInfo info;
   info.connection = connection.value();
+  info.promptEveryTime = connectionPromptsEveryTime(connection->optionsJson);
 
   QSqlDatabase db = databaseManager_->database();
   if (connection->credentialId.has_value() || connection->secretId.has_value() || connection->username.has_value() ||
