@@ -184,11 +184,14 @@ MainWindow::MainWindow(DatabaseManager* databaseManager, vaultrdp::core::VaultMa
       vaultStatusLabel_(nullptr),
       debugModeLabel_(nullptr),
       unlockVaultButton_(nullptr),
+      treeMenuButton_(nullptr),
       treeConnectButton_(nullptr),
       treeNewConnectionButton_(nullptr),
       treeNewFolderButton_(nullptr),
       treeNewCredentialButton_(nullptr),
       treeNewGatewayButton_(nullptr),
+      treeLogoffButton_(nullptr),
+      treeLockButton_(nullptr),
       mainToolBar_(nullptr),
       mainSplitter_(nullptr),
       treePaneWidget_(nullptr),
@@ -243,16 +246,15 @@ void MainWindow::setupUi() {
   auto* treeActionLayout = new QHBoxLayout(treeActionBar);
   treeActionLayout->setContentsMargins(8, 6, 8, 6);
   treeActionLayout->setSpacing(6);
-  treeActionLayout->addStretch();
 
-  treeConnectButton_ = new QToolButton(treeActionBar);
-  treeConnectButton_->setObjectName("treeActionButton");
-  treeConnectButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
-  treeConnectButton_->setToolTip("Connect selected connection");
-  treeConnectButton_->setFixedSize(36, 36);
-  treeConnectButton_->setIconSize(QSize(26, 26));
-  connect(treeConnectButton_, &QToolButton::clicked, this, &MainWindow::connectSelectedConnection);
-  treeActionLayout->addWidget(treeConnectButton_);
+  treeMenuButton_ = new QToolButton(treeActionBar);
+  treeMenuButton_->setObjectName("treeActionButton");
+  treeMenuButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
+  treeMenuButton_->setToolTip("Menu");
+  treeMenuButton_->setPopupMode(QToolButton::InstantPopup);
+  treeMenuButton_->setFixedSize(36, 36);
+  treeMenuButton_->setIconSize(QSize(26, 26));
+  treeActionLayout->addWidget(treeMenuButton_);
 
   treeNewConnectionButton_ = new QToolButton(treeActionBar);
   treeNewConnectionButton_->setObjectName("treeActionButton");
@@ -290,8 +292,15 @@ void MainWindow::setupUi() {
   connect(treeNewGatewayButton_, &QToolButton::clicked, this, &MainWindow::createGateway);
   treeActionLayout->addWidget(treeNewGatewayButton_);
 
-  treeActionLayout->addStretch();
   treePaneLayout->addWidget(treeActionBar);
+
+  treeSearchEdit_ = new QLineEdit(treePane);
+  treeSearchEdit_->setPlaceholderText("Search...");
+  treeSearchEdit_->setClearButtonEnabled(true);
+  treeSearchEdit_->setObjectName("treeSearchEdit");
+  treeSearchEdit_->setContentsMargins(10, 6, 10, 6);
+  connect(treeSearchEdit_, &QLineEdit::textChanged, this, &MainWindow::applyTreeFilter);
+  treePaneLayout->addWidget(treeSearchEdit_);
 
   auto* dragTreeView = new vaultrdp::ui::FolderTreeView(treePane);
   folderTreeView_ = dragTreeView;
@@ -395,6 +404,48 @@ void MainWindow::setupUi() {
     }
     scheduleReload();
   });
+
+  auto* treeFooter = new QWidget(treePane);
+  treeFooter->setObjectName("treeFooter");
+  auto* treeFooterLayout = new QHBoxLayout(treeFooter);
+  treeFooterLayout->setContentsMargins(10, 10, 10, 10);
+  treeFooterLayout->setSpacing(6);
+
+  treeConnectButton_ = new QToolButton(treeFooter);
+  treeConnectButton_->setObjectName("treeQuickButton");
+  treeConnectButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
+  treeConnectButton_->setToolTip("Connect selected connection");
+  treeConnectButton_->setFixedSize(30, 30);
+  treeConnectButton_->setIconSize(QSize(18, 18));
+  connect(treeConnectButton_, &QToolButton::clicked, this, &MainWindow::connectOrDisconnectSelectedConnection);
+  treeFooterLayout->addWidget(treeConnectButton_);
+
+  treeLogoffButton_ = new QToolButton(treeFooter);
+  treeLogoffButton_->setObjectName("treeQuickButton");
+  treeLogoffButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
+  treeLogoffButton_->setToolTip("Logoff current session");
+  treeLogoffButton_->setFixedSize(30, 30);
+  treeLogoffButton_->setIconSize(QSize(18, 18));
+  connect(treeLogoffButton_, &QToolButton::clicked, this, &MainWindow::logoffCurrentSession);
+  treeFooterLayout->addWidget(treeLogoffButton_);
+
+  treeLockButton_ = new QToolButton(treeFooter);
+  treeLockButton_->setObjectName("treeQuickButton");
+  treeLockButton_->setToolButtonStyle(Qt::ToolButtonIconOnly);
+  treeLockButton_->setToolTip("Lock or unlock vault");
+  treeLockButton_->setFixedSize(30, 30);
+  treeLockButton_->setIconSize(QSize(18, 18));
+  connect(treeLockButton_, &QToolButton::clicked, this, [this]() {
+    if (vaultManager_->state() == vaultrdp::core::VaultState::Locked) {
+      ensureVaultUnlocked();
+    } else {
+      vaultManager_->lock();
+    }
+    updateVaultStatus();
+  });
+  treeFooterLayout->addWidget(treeLockButton_);
+  treeFooterLayout->addStretch();
+  treePaneLayout->addWidget(treeFooter);
 
   auto* sessionPane = new QWidget(mainSplitter_);
   auto* sessionPaneLayout = new QVBoxLayout(sessionPane);
@@ -830,6 +881,23 @@ void MainWindow::updateCreateActionAvailability() {
                    this));
     treeConnectButton_->setEnabled(canConnect);
   }
+  if (treeLogoffButton_ != nullptr) {
+    const auto currentId = currentSessionConnectionId();
+    auto* session = currentId.has_value() ? sessionWorkspace_->sessionForConnection(currentId.value()) : nullptr;
+    const bool canLogoff =
+        session != nullptr && session->state() == vaultrdp::protocols::SessionState::Connected;
+    treeLogoffButton_->setEnabled(canLogoff);
+  }
+  if (treeLockButton_ != nullptr) {
+    const bool encryptionEnabled = vaultManager_ != nullptr &&
+                                   vaultManager_->state() != vaultrdp::core::VaultState::Disabled;
+    const bool vaultLocked = vaultManager_ != nullptr &&
+                             vaultManager_->state() == vaultrdp::core::VaultState::Locked;
+    treeLockButton_->setIcon(
+        themedIcon(vaultLocked ? vaultrdp::ui::AppIcon::Unlock : vaultrdp::ui::AppIcon::Lock, this));
+    treeLockButton_->setToolTip(vaultLocked ? "Unlock vault" : "Lock vault");
+    treeLockButton_->setEnabled(encryptionEnabled);
+  }
   if (treeNewConnectionButton_ != nullptr) {
     treeNewConnectionButton_->setEnabled(canCreateUnderCurrent);
   }
@@ -1075,17 +1143,10 @@ void MainWindow::setupToolBar() {
   mainToolBar_ = addToolBar("Main");
   mainToolBar_->setMovable(false);
   mainToolBar_->setObjectName("topToolBar");
-  mainToolBar_->setIconSize(QSize(22, 22));
+  mainToolBar_->setVisible(false);
+  mainToolBar_->hide();
 
-  auto* appMenuButton = new QToolButton(mainToolBar_);
-  appMenuButton->setObjectName("topMenuButton");
-  appMenuButton->setToolTip("Menu");
-  appMenuButton->setPopupMode(QToolButton::InstantPopup);
-  appMenuButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
-  appMenuButton->setIcon(themedIcon(vaultrdp::ui::AppIcon::Menu, this));
-  appMenuButton->setIconSize(QSize(30, 30));
-  appMenuButton->setFixedSize(46, 46);
-  auto* appMenu = new QMenu(appMenuButton);
+  auto* appMenu = new QMenu(this);
 
   auto addSubMenuFromMenuBar = [this, appMenu](const QString& title) {
     if (menuBar() == nullptr) {
@@ -1113,76 +1174,16 @@ void MainWindow::setupToolBar() {
   addSubMenuFromMenuBar("&Session");
   addSubMenuFromMenuBar("&Vault");
   addSubMenuFromMenuBar("&Help");
-  appMenuButton->setMenu(appMenu);
-  mainToolBar_->addWidget(appMenuButton);
+  if (treeMenuButton_ != nullptr) {
+    treeMenuButton_->setMenu(appMenu);
+  }
   if (menuBar() != nullptr) {
     menuBar()->setVisible(false);
   }
-
-  auto* brandIconLabel = new QLabel(mainToolBar_);
-  brandIconLabel->setPixmap(themedIcon(vaultrdp::ui::AppIcon::Brand, 44, this).pixmap(44, 44));
-  brandIconLabel->setObjectName("topBrandIconLabel");
-  mainToolBar_->addWidget(brandIconLabel);
-
-  auto* brandLabel = new QLabel("VaultRDP", mainToolBar_);
-  brandLabel->setObjectName("topBrandLabel");
-  brandLabel->setMargin(2);
-  mainToolBar_->addWidget(brandLabel);
-  mainToolBar_->addSeparator();
-
-  treeSearchEdit_ = new QLineEdit(mainToolBar_);
-  treeSearchEdit_->setPlaceholderText("Search tree...");
-  treeSearchEdit_->setClearButtonEnabled(true);
-  treeSearchEdit_->setMinimumWidth(420);
-  treeSearchEdit_->setMaximumWidth(760);
-  treeSearchEdit_->setObjectName("topSearchEdit");
-  mainToolBar_->addWidget(treeSearchEdit_);
-  connect(treeSearchEdit_, &QLineEdit::textChanged, this, &MainWindow::applyTreeFilter);
-
-  auto* spacer = new QWidget(mainToolBar_);
-  spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-  mainToolBar_->addWidget(spacer);
-
-  mainToolBar_->addSeparator();
-  mainToolBar_->addAction(connectAction_);
-  mainToolBar_->addSeparator();
-  mainToolBar_->addAction(logoffAction_);
   exitFullscreenAction_ = new QAction(themedIcon(vaultrdp::ui::AppIcon::Disconnect, this), "Exit Full Screen", this);
   connect(exitFullscreenAction_, &QAction::triggered, this, &MainWindow::exitSessionFullscreen);
   exitFullscreenAction_->setVisible(false);
   exitFullscreenAction_->setEnabled(false);
-  mainToolBar_->addAction(exitFullscreenAction_);
-  mainToolBar_->addSeparator();
-  mainToolBar_->addAction(lockVaultAction_);
-
-  if (auto* connectButton = qobject_cast<QToolButton*>(mainToolBar_->widgetForAction(connectAction_))) {
-    connectButton->setObjectName("connectButton");
-    connectButton->setMinimumHeight(46);
-    connectButton->setIconSize(QSize(24, 24));
-    connectButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    connectButton->setToolTip("Connect");
-  }
-  if (auto* lockButton = qobject_cast<QToolButton*>(mainToolBar_->widgetForAction(lockVaultAction_))) {
-    lockButton->setObjectName("lockButton");
-    lockButton->setMinimumHeight(46);
-    lockButton->setIconSize(QSize(24, 24));
-    lockButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-  }
-  if (auto* logoffButton = qobject_cast<QToolButton*>(mainToolBar_->widgetForAction(logoffAction_))) {
-    logoffButton->setObjectName("logoffButton");
-    logoffButton->setMinimumHeight(46);
-    logoffButton->setIconSize(QSize(24, 24));
-    logoffButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    logoffButton->setToolTip("Logoff remote session");
-  }
-  if (auto* exitFsButton = qobject_cast<QToolButton*>(
-          mainToolBar_->widgetForAction(exitFullscreenAction_))) {
-    exitFsButton->setObjectName("exitFullscreenButton");
-    exitFsButton->setMinimumHeight(46);
-    exitFsButton->setIconSize(QSize(24, 24));
-    exitFsButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    exitFsButton->setToolTip("Exit full screen");
-  }
 }
 
 void MainWindow::scheduleTreeReload() {
@@ -1467,17 +1468,14 @@ void MainWindow::applyTheme(ThemeMode mode) {
         "QMenu{background:#252b35;color:#dfe4ec;border:1px solid #3a4252;}"
         "QMenu::item:selected{background:#3a4252;}"
         "QMenu::item:disabled{color:#7e8897;}"
-        "QToolBar#topToolBar{background:#262b35;border-bottom:1px solid #313846;spacing:10px;padding:8px 10px;}"
-        "QToolButton#topMenuButton{background:#313846;border:1px solid #465064;border-radius:8px;color:#e0e6f1;padding:0;}"
-        "QToolButton#topMenuButton:hover{background:#3b4455;}"
-        "QLabel#topBrandLabel{font-size:18px;font-weight:700;color:#e6ebf2;padding-left:4px;padding-right:8px;}"
-        "QLineEdit#topSearchEdit{background:#1f2430;border:1px solid #3a4252;border-radius:8px;padding:9px 12px;color:#dfe4ec;min-height:20px;}"
         "QWidget#treeActionBar{background:#232934;border-bottom:1px solid #313846;}"
         "QToolButton#treeActionButton{background:#2f3643;border:1px solid #3f495a;border-radius:7px;padding:0;color:#d9e0eb;}"
         "QToolButton#treeActionButton:disabled{background:#2a303b;border-color:#394250;color:#7e8897;}"
+        "QLineEdit#treeSearchEdit{background:#1f2430;border:1px solid #3a4252;border-radius:8px;padding:9px 12px;color:#dfe4ec;min-height:20px;margin:8px 10px 8px 10px;}"
+        "QWidget#treeFooter{background:#232934;border-top:1px solid #313846;}"
+        "QToolButton#treeQuickButton{background:#2f3643;border:1px solid #3f495a;border-radius:7px;padding:0;color:#d9e0eb;}"
+        "QToolButton#treeQuickButton:disabled{background:#2a303b;border-color:#394250;color:#7e8897;}"
         "QToolButton{background:#333b49;border:1px solid #435066;border-radius:8px;padding:9px 15px;color:#d9e0eb;}"
-        "QToolButton#connectButton{background:#2f4f88;border-color:#3e5f9a;color:#ecf2ff;padding:0;}"
-        "QToolButton#lockButton{background:#3b414d;border-color:#4a5261;color:#d3dae5;padding:0;}"
         "QToolButton:disabled{background:#2b313d;border-color:#394250;color:#7e8897;}"
         "QTreeView{background:#1d222c;border-right:1px solid #2f3643;padding:6px 4px;show-decoration-selected:0;}"
         "QTreeView::item{padding:5px 6px;border-radius:6px;min-height:22px;}"
@@ -1499,17 +1497,14 @@ void MainWindow::applyTheme(ThemeMode mode) {
         "QMenu{background:#ffffff;color:#2f3742;border:1px solid #d5dae4;}"
         "QMenu::item:selected{background:#e8edf7;}"
         "QMenu::item:disabled{color:#9aa3b3;}"
-        "QToolBar#topToolBar{background:#f0f2f6;border-bottom:1px solid #d9dde6;spacing:10px;padding:8px 10px;}"
-        "QToolButton#topMenuButton{background:#e2e6ee;border:1px solid #c8cfdb;border-radius:8px;color:#4f5b6f;padding:0;}"
-        "QToolButton#topMenuButton:hover{background:#d8deea;}"
-        "QLabel#topBrandLabel{font-size:18px;font-weight:700;color:#273240;padding-left:4px;padding-right:8px;}"
-        "QLineEdit#topSearchEdit{background:#ffffff;border:1px solid #cfd5e1;border-radius:8px;padding:9px 12px;color:#2f3742;min-height:20px;}"
         "QWidget#treeActionBar{background:#f2f4f8;border-bottom:1px solid #d9dde6;}"
         "QToolButton#treeActionButton{background:#e8edf5;border:1px solid #d0d8e5;border-radius:7px;padding:0;color:#4f5b6f;}"
         "QToolButton#treeActionButton:disabled{background:#e6ebf3;border-color:#d0d7e4;color:#8f98a8;}"
+        "QLineEdit#treeSearchEdit{background:#ffffff;border:1px solid #cfd5e1;border-radius:8px;padding:9px 12px;color:#2f3742;min-height:20px;margin:8px 10px 8px 10px;}"
+        "QWidget#treeFooter{background:#f2f4f8;border-top:1px solid #d9dde6;}"
+        "QToolButton#treeQuickButton{background:#e8edf5;border:1px solid #d0d8e5;border-radius:7px;padding:0;color:#4f5b6f;}"
+        "QToolButton#treeQuickButton:disabled{background:#e6ebf3;border-color:#d0d7e4;color:#8f98a8;}"
         "QToolButton{background:#e8edf5;border:1px solid #d0d8e5;border-radius:8px;padding:9px 15px;color:#4f5b6f;}"
-        "QToolButton#connectButton{background:#3f7ee8;border-color:#4f8cee;color:#ffffff;padding:0;}"
-        "QToolButton#lockButton{background:#e8edf5;border-color:#d0d8e5;color:#4f5b6f;padding:0;}"
         "QToolButton:disabled{background:#e6ebf3;border-color:#d0d7e4;color:#8f98a8;}"
         "QTreeView{background:#f7f8fb;border-right:1px solid #d9dde6;padding:6px 4px;show-decoration-selected:0;}"
         "QTreeView::item{padding:5px 6px;border-radius:6px;min-height:22px;}"
@@ -1557,7 +1552,11 @@ void MainWindow::applyTheme(ThemeMode mode) {
   }
   if (treeConnectButton_ != nullptr) {
     treeConnectButton_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Connect, this));
-    treeConnectButton_->setIconSize(QSize(26, 26));
+    treeConnectButton_->setIconSize(QSize(18, 18));
+  }
+  if (treeMenuButton_ != nullptr) {
+    treeMenuButton_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Brand, this));
+    treeMenuButton_->setIconSize(QSize(26, 26));
   }
   if (treeNewConnectionButton_ != nullptr) {
     treeNewConnectionButton_->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewConnection, this));
@@ -1575,6 +1574,16 @@ void MainWindow::applyTheme(ThemeMode mode) {
     treeNewGatewayButton_->setIcon(themedIcon(vaultrdp::ui::AppIcon::NewGateway, this));
     treeNewGatewayButton_->setIconSize(QSize(26, 26));
   }
+  if (treeLogoffButton_ != nullptr) {
+    treeLogoffButton_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Logoff, this));
+    treeLogoffButton_->setIconSize(QSize(18, 18));
+  }
+  if (treeLockButton_ != nullptr) {
+    const bool locked = vaultManager_ != nullptr && vaultManager_->state() == vaultrdp::core::VaultState::Locked;
+    treeLockButton_->setIcon(
+        themedIcon(locked ? vaultrdp::ui::AppIcon::Unlock : vaultrdp::ui::AppIcon::Lock, this));
+    treeLockButton_->setIconSize(QSize(18, 18));
+  }
   if (disconnectAction_ != nullptr) {
     disconnectAction_->setIcon(themedIcon(vaultrdp::ui::AppIcon::Disconnect, this));
   }
@@ -1585,42 +1594,6 @@ void MainWindow::applyTheme(ThemeMode mode) {
     const bool locked = vaultManager_ != nullptr && vaultManager_->state() == vaultrdp::core::VaultState::Locked;
     lockVaultAction_->setIcon(
         themedIcon(locked ? vaultrdp::ui::AppIcon::Unlock : vaultrdp::ui::AppIcon::Lock, this));
-  }
-  if (auto* brandIconLabel = findChild<QLabel*>("topBrandIconLabel")) {
-    brandIconLabel->setPixmap(themedIcon(vaultrdp::ui::AppIcon::Brand, 44, this).pixmap(44, 44));
-  }
-  if (auto* topMenuButton = findChild<QToolButton*>("topMenuButton")) {
-    topMenuButton->setIcon(themedIcon(vaultrdp::ui::AppIcon::Menu, this));
-    topMenuButton->setIconSize(QSize(30, 30));
-    topMenuButton->setFixedSize(46, 46);
-  }
-  if (auto* connectButton = qobject_cast<QToolButton*>(mainToolBar_ != nullptr
-                                                             ? mainToolBar_->widgetForAction(connectAction_)
-                                                             : nullptr)) {
-    connectButton->setIconSize(QSize(24, 24));
-    connectButton->setMinimumHeight(46);
-    connectButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-  }
-  if (auto* logoffButton = qobject_cast<QToolButton*>(mainToolBar_ != nullptr
-                                                           ? mainToolBar_->widgetForAction(logoffAction_)
-                                                           : nullptr)) {
-    logoffButton->setIconSize(QSize(24, 24));
-    logoffButton->setMinimumHeight(46);
-    logoffButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-  }
-  if (auto* exitFsButton = qobject_cast<QToolButton*>(mainToolBar_ != nullptr
-                                                           ? mainToolBar_->widgetForAction(exitFullscreenAction_)
-                                                           : nullptr)) {
-    exitFsButton->setIconSize(QSize(24, 24));
-    exitFsButton->setMinimumHeight(46);
-    exitFsButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-  }
-  if (auto* lockButton = qobject_cast<QToolButton*>(mainToolBar_ != nullptr
-                                                         ? mainToolBar_->widgetForAction(lockVaultAction_)
-                                                         : nullptr)) {
-    lockButton->setIconSize(QSize(24, 24));
-    lockButton->setMinimumHeight(46);
-    lockButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
   }
   if (folderTreeModel_ != nullptr) {
     QSignalBlocker modelBlocker(folderTreeModel_);
@@ -2585,9 +2558,6 @@ void MainWindow::updateVaultStatus() {
 void MainWindow::applyVaultUiState() {
   const bool locked = vaultManager_->state() == vaultrdp::core::VaultState::Locked;
 
-  if (centralWidget() != nullptr) {
-    centralWidget()->setEnabled(!locked);
-  }
   if (menuBar() != nullptr) {
     menuBar()->setEnabled(!locked);
   }
@@ -2603,11 +2573,38 @@ void MainWindow::applyVaultUiState() {
       }
     }
   }
+  if (folderTreeView_ != nullptr) {
+    folderTreeView_->setEnabled(!locked);
+  }
   if (treeSearchEdit_ != nullptr) {
     treeSearchEdit_->setEnabled(!locked);
   }
-  if (auto* topMenuButton = findChild<QToolButton*>("topMenuButton")) {
-    topMenuButton->setEnabled(!locked);
+  if (treeNewConnectionButton_ != nullptr) {
+    treeNewConnectionButton_->setEnabled(!locked);
+  }
+  if (treeNewFolderButton_ != nullptr) {
+    treeNewFolderButton_->setEnabled(!locked);
+  }
+  if (treeNewCredentialButton_ != nullptr) {
+    treeNewCredentialButton_->setEnabled(!locked);
+  }
+  if (treeNewGatewayButton_ != nullptr) {
+    treeNewGatewayButton_->setEnabled(!locked);
+  }
+  if (treeConnectButton_ != nullptr) {
+    treeConnectButton_->setEnabled(!locked);
+  }
+  if (treeLogoffButton_ != nullptr) {
+    treeLogoffButton_->setEnabled(!locked && treeLogoffButton_->isEnabled());
+  }
+  if (treeLockButton_ != nullptr) {
+    treeLockButton_->setEnabled(vaultManager_->isEnabled());
+  }
+  if (sessionTabWidget_ != nullptr) {
+    sessionTabWidget_->setEnabled(!locked);
+  }
+  if (treeMenuButton_ != nullptr) {
+    treeMenuButton_->setEnabled(true);
   }
   if (unlockVaultButton_ != nullptr) {
     unlockVaultButton_->setVisible(false);

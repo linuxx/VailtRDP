@@ -185,11 +185,14 @@ class MainWindow : public QMainWindow {
   QLabel* vaultStatusLabel_;
   QLabel* debugModeLabel_;
   QPushButton* unlockVaultButton_;
+  QToolButton* treeMenuButton_;
   QToolButton* treeConnectButton_;
   QToolButton* treeNewConnectionButton_;
   QToolButton* treeNewFolderButton_;
   QToolButton* treeNewCredentialButton_;
   QToolButton* treeNewGatewayButton_;
+  QToolButton* treeLogoffButton_;
+  QToolButton* treeLockButton_;
   QToolBar* mainToolBar_;
   QSplitter* mainSplitter_;
   QWidget* treePaneWidget_;

@@ -521,6 +521,9 @@ void MainWindow::showTreeContextMenu(const QPoint& pos) {
     if (itemType == kItemTypeVaultRoot) {
       menu.addAction("New Root Folder", this, &MainWindow::createFolder);
       menu.addSeparator();
+      auto* vaultSettingsAction = menu.addAction("Vault Settings...", this, &MainWindow::showVaultSettingsDialog);
+      vaultSettingsAction->setIcon(themedIcon(vaultrdp::ui::AppIcon::Settings, this));
+      menu.addSeparator();
       menu.addAction("Expand All", folderTreeView_, &QTreeView::expandAll);
       menu.addAction("Collapse All", folderTreeView_, &QTreeView::collapseAll);
     } else if (itemType == kItemTypeFolder) {

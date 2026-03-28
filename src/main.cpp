@@ -9,13 +9,17 @@
 #include "core/AppPaths.hpp"
 #include "core/DatabaseManager.hpp"
 #include "core/VaultManager.hpp"
+#include "ui/IconTheme.hpp"
 #include "ui/MainWindow.hpp"
 
 int main(int argc, char* argv[]) {
   QApplication app(argc, argv);
   QCoreApplication::setApplicationName("VaultRDP");
   QCoreApplication::setOrganizationName("VaultRDP");
-  QIcon appIcon(":/icons/vaultrdp.ico");
+  QIcon appIcon = vaultrdp::ui::themedIcon(vaultrdp::ui::AppIcon::Brand, 128, nullptr);
+  if (appIcon.isNull()) {
+    appIcon = QIcon(":/icons/vaultrdp.ico");
+  }
   if (appIcon.isNull()) {
     appIcon = QIcon(":/icons/vaultrdp.png");
   }

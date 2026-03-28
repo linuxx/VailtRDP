@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=VaultRDP
+Comment=Encrypted RDP connection manager
+Exec=/home/cbeagle/Apps/VailtRDP/build/vaultrdp
+Icon=/home/cbeagle/Apps/VailtRDP/resources/icons/vaultrdp-shield.svg
+Terminal=false
+Categories=Network;RemoteAccess;Utility;
+StartupNotify=true
+StartupWMClass=vaultrdp
